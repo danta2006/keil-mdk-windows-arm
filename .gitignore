@@ -1,0 +1,13 @@
+# OS / editor
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+
+# PowerShell
+*.log
+
+# local artifacts
+*.hex
+*.bin
+*.axf
