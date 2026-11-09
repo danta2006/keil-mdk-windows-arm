@@ -1,0 +1,32 @@
+# NOTICE
+
+This repository contains **only original text and scripts** (MIT licensed, see LICENSE).
+
+## Not distributed here
+
+No third-party binaries, installers, device packs or documentation are included
+or redistributed. In particular:
+
+| Software | Owner | Where to get it |
+|---|---|---|
+| Keil MDK / ARM Compiler (armcc, armclang) | Arm Limited | https://www.keil.com/ |
+| STM32 device family packs (`Keil.STM32F4xx_DFP`) | STMicroelectronics | Keil Pack Installer, or https://www.keil.arm.com/packs/ |
+| STM32CubeProgrammer / ST DFU driver | STMicroelectronics | https://www.st.com/ |
+| usbipd-win | dorssel (GPL-3.0) | https://github.com/dorssel/usbipd-win/releases |
+| Ubuntu / Debian packages | respective maintainers | distribution mirrors |
+| Probe drivers (ST-Link, J-Link, ULINK) | ST / SEGGER / Arm | vendor sites |
+
+Every tool referenced in the documentation must be obtained from its official
+source and used under its own license. Nothing here grants any such license.
+
+## Trademarks
+
+ARM, Cortex, Keil and µVision are trademarks of Arm Limited or its subsidiaries.
+STM32 is a trademark of STMicroelectronics. Other names are the property of their
+respective owners. This project is not affiliated with or endorsed by any of them.
+
+## Accuracy
+
+The measurements and error messages quoted in the documentation were observed on
+a specific machine and software version. Behaviour may differ elsewhere. See the
+"Validation status" section of the README for what has and has not been verified.

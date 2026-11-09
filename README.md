@@ -398,4 +398,8 @@ Section 4's data path is sound — the Linux side genuinely has the driver and u
 
 ## 10. License
 
-Text and scripts: MIT (see [LICENSE](LICENSE)). Vendor binaries are **not** included.
+Text and scripts: **MIT** (see [LICENSE](LICENSE)).
+
+No vendor binaries, installers or device packs are distributed here. See
+[NOTICE](NOTICE) for where each third-party tool must be obtained from and the
+trademark attributions.

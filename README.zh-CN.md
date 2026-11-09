@@ -398,4 +398,7 @@ wsl -d Ubuntu2204 -e lsusb
 
 ## 10. 许可
 
-文档与脚本：MIT（见 [LICENSE](LICENSE)）。**不包含**任何厂商二进制文件。
+文档与脚本：**MIT**（见 [LICENSE](LICENSE)）。
+
+本仓库**不包含**任何厂商二进制文件、安装包或器件包。各第三方工具的官方获取渠道
+与商标声明见 [NOTICE](NOTICE)。

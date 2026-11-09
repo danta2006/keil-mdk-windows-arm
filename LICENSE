@@ -19,15 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-Third-party software is NOT covered by this license and is NOT distributed here:
-
-  * Keil MDK / ARM Compiler      - Arm Limited
-  * STM32 device family packs    - STMicroelectronics
-  * usbipd-win                   - Daniel Stenberg / dorssel (GPL-3.0)
-  * Ubuntu / Debian packages     - respective maintainers
-  * STM32CubeProgrammer / DFU drivers - STMicroelectronics
-
-Download those from their official sources.
