@@ -248,7 +248,13 @@ lsusb
 ls /dev/ttyUSB0
 ```
 
-`bind` 是持久的；**`attach` 每次重新插拔或重启后都要重做。**
+`bind` 是持久的，但 **`attach` 不会跨拔插或 WSL 重启存活**。加上 `--auto-attach` 让 usbipd 自动重挂：
+
+```powershell
+usbipd attach --wsl --busid 2-1 --auto-attach
+```
+
+不加这个参数的话，VM 一重启设备就悄悄丢了，症状是"刚才还好好的，现在 `/dev/ttyUSB0` 不见了"——重新 `attach` 一次即可（或者干脆一开始就带上这个参数）。
 
 ## 6. 日常流程
 

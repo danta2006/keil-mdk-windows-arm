@@ -248,7 +248,13 @@ lsusb
 ls /dev/ttyUSB0
 ```
 
-`bind` is persistent; **`attach` must be repeated after every re-plug or reboot.**
+`bind` is persistent, but **`attach` does not survive a re-plug or a WSL restart**. Add `--auto-attach` so usbipd re-attaches on its own:
+
+```powershell
+usbipd attach --wsl --busid 2-1 --auto-attach
+```
+
+Without that flag a restarted VM silently loses the device, and you get "it worked a minute ago, now `/dev/ttyUSB0` is gone" — re-run `attach` (or just use the flag once).
 
 ## 6. Daily workflow
 
