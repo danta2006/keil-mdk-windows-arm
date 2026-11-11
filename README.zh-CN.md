@@ -374,9 +374,42 @@ wsl -d Ubuntu2204 -e lsusb
 
 如果 `usbipd list` 能看到设备但 `lsusb` 是空的，说明 `attach` 没执行（或者 VM 重启过了，需要重新 attach）。
 
+### 7.8 已 attach、`lsusb` 也能看到，但没有 `/dev/ttyUSB*`
+
+在 WSL 内核更新后遇到过（6.18.54.1 → 6.18.58.1）。设备确实透传进来了，但串口驱动没加载，所以没有驱动绑定它：
+
+```
+$ lsusb
+Bus 001 Device 002: ID 1a86:7523 QinHeng Electronics CH340 serial converter
+
+$ ls /dev/ttyUSB*
+(无 tty)
+```
+
+先确认驱动真的没绑定，再去查别的：
+
+```bash
+ls -l /sys/bus/usb/devices/1-1/driver
+# -> .../usb/drivers/usb      只有通用 usb 驱动，ch341 没绑上
+```
+
+修复——手动加载：
+
+```bash
+uname -r                 # 必须能在 /lib/modules 下找到同名目录
+modprobe ch341
+dmesg | tail -3
+# ch341-uart converter now attached to ttyUSB0
+```
+
+这里有两个坑：
+
+- `wsl -d <发行版> -e modprobe ch341` 会报 `execvpe(modprobe) failed`，因为 `-e` 不走登录 shell，`/sbin` 不在 PATH 里。要用 shell 包一层：`wsl -d <发行版> -e bash -c "modprobe ch341"`。
+- 内核升级后 `/lib/modules` 里可能新旧两套目录并存，`modprobe` 只认 `uname -r` 对应的那套；如果那个目录根本不存在，重跑环境安装脚本。
+
 ## 8. 验证状态
 
-请留意哪些在真实硬件上验证过、哪些还没有：
+下列各项均已在真实硬件上确认。
 
 | 步骤 | 状态 |
 |---|---|
@@ -385,9 +418,29 @@ wsl -d Ubuntu2204 -e lsusb
 | 不用 `wsl --install`，直接导入 WSL 3.0.3.0 + Ubuntu 22.04 ARM64 | ✅ 已验证 |
 | `ch341.ko` / `vhci-hcd.ko` 存在且可加载 | ✅ 已验证 |
 | `usbipd-win` arm64 版安装、服务运行 | ✅ 已验证 |
-| 端到端：接真实 CH340 并用 `stm32flash` 烧写 | ⏳ 待硬件到齐 |
+| CH340 经 usbipd 透传、`ch341` 绑定、生成 `/dev/ttyUSB0` | ✅ 已验证 |
+| `stm32flash` 通过该串口写入并校验 | ✅ 已验证 |
+| 从 WSL 读回串口输出 | ✅ 已验证 |
 
-第 4 节的数据通路是成立的——Linux 侧确实有驱动，usbipd 确实绕过 Windows 驱动——但如果你要靠这套方案赶工期，**请给最后一步留出验证时间**。
+实际运行记录（STM32F407ZET6，20 KB HEX，走 STM32 串口 bootloader）：
+
+```
+Interface serial_posix: 57600 8E1
+Device ID    : 0x0413 (STM32F40xxx/41xxx)
+Flash        : Up to 1024KiB (size first sector: 1x16384)
+...
+Wrote and verified address 0x08001c0c (100.00%) Done.
+Starting execution at address 0x08000000... done.
+```
+
+```
+$ stty -F /dev/ttyUSB0 115200 cs8 -cstopb -parenb raw -echo
+$ timeout 8 cat /dev/ttyUSB0
+uptime = 13 s
+uptime = 14 s
+```
+
+在 Keil 里编译，在 WSL 里烧录，在 WSL 里读串口。Windows 侧自始至终没有装过任何厂商驱动。
 
 ## 9. 适用范围与限制
 

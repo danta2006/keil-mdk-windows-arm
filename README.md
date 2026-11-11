@@ -374,9 +374,42 @@ wsl -d Ubuntu2204 -e lsusb
 
 If `usbipd list` shows the device but `lsusb` is empty, `attach` did not run (or the VM was restarted — re-attach).
 
+### 7.8 Attached, visible in `lsusb`, but no `/dev/ttyUSB*`
+
+Observed after a WSL kernel update (6.18.54.1 → 6.18.58.1). The device is forwarded correctly but the serial driver was never loaded, so nothing binds to it:
+
+```
+$ lsusb
+Bus 001 Device 002: ID 1a86:7523 QinHeng Electronics CH340 serial converter
+
+$ ls /dev/ttyUSB*
+(no tty)
+```
+
+Confirm the driver really is absent before chasing anything else:
+
+```bash
+ls -l /sys/bus/usb/devices/1-1/driver
+# -> .../usb/drivers/usb      (generic only; ch341 is NOT bound)
+```
+
+Fix — load it manually:
+
+```bash
+uname -r                 # must match a directory under /lib/modules
+modprobe ch341
+dmesg | tail -3
+# ch341-uart converter now attached to ttyUSB0
+```
+
+Two traps here:
+
+- `wsl -d <distro> -e modprobe ch341` fails with `execvpe(modprobe) failed` because `-e` does not use a login shell and `/sbin` is not on the PATH. Run it through a shell: `wsl -d <distro> -e bash -c "modprobe ch341"`.
+- After a kernel bump, `/lib/modules` may contain both the old and the new tree. `modprobe` picks the one matching `uname -r`; if that directory is missing entirely, re-run the environment installer.
+
 ## 8. Validation status
 
-Be aware of what has and has not been proven on hardware:
+Everything below was confirmed on real hardware.
 
 | Step | Status |
 |---|---|
@@ -385,9 +418,29 @@ Be aware of what has and has not been proven on hardware:
 | WSL 3.0.3.0 + Ubuntu 22.04 ARM64 import without `wsl --install` | ✅ verified |
 | `ch341.ko` / `vhci-hcd.ko` present and loadable | ✅ verified |
 | `usbipd-win` arm64 build installs, service runs | ✅ verified |
-| End-to-end: attach a real CH340 and flash with `stm32flash` | ⏳ pending hardware |
+| CH340 attached via usbipd, `ch341` bound, `/dev/ttyUSB0` created | ✅ verified |
+| `stm32flash` writes + verifies over that tty | ✅ verified |
+| Serial console read back through WSL | ✅ verified |
 
-Section 4's data path is sound — the Linux side genuinely has the driver and usbipd genuinely bypasses the Windows driver — but if you are depending on this for a deadline, budget time to validate the last step on your own board.
+Actual run (STM32F407ZET6, 20 KB HEX, STM32 UART bootloader):
+
+```
+Interface serial_posix: 57600 8E1
+Device ID    : 0x0413 (STM32F40xxx/41xxx)
+Flash        : Up to 1024KiB (size first sector: 1x16384)
+...
+Wrote and verified address 0x08001c0c (100.00%) Done.
+Starting execution at address 0x08000000... done.
+```
+
+```
+$ stty -F /dev/ttyUSB0 115200 cs8 -cstopb -parenb raw -echo
+$ timeout 8 cat /dev/ttyUSB0
+uptime = 13 s
+uptime = 14 s
+```
+
+Build in Keil, flash from WSL, read the console from WSL. No vendor driver was ever installed on Windows.
 
 ## 9. Scope and limitations
 
