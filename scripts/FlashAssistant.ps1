@@ -71,14 +71,20 @@ function Say($m, $c = "Gray") { Write-Host $m -ForegroundColor $c }
 # ----------------------------------------------------------------- settings
 function Load-Settings {
     if (Test-Path $SETTINGS_FILE) {
-        try { return Get-Content $SETTINGS_FILE -Raw | ConvertFrom-Json } catch {}
+        try {
+            $s = Get-Content $SETTINGS_FILE -Raw | ConvertFrom-Json
+            # migrate / fill defaults
+            if ($null -eq $s.Recent) { $s | Add-Member -NotePropertyName Recent -NotePropertyValue @() -Force }
+            if ($null -eq $s.Follow) { $s | Add-Member -NotePropertyName Follow -NotePropertyValue $true -Force }
+            return $s
+        } catch {}
     }
-    return [pscustomobject]@{ Project = ""; Hex = ""; Distro = "Ubuntu2204" }
+    return [pscustomobject]@{ Project = ""; Hex = ""; Distro = "Ubuntu2204"; Recent = @(); Follow = $true }
 }
 
 function Save-Settings($s) {
     if (-not (Test-Path $SETTINGS_DIR)) { New-Item -ItemType Directory -Path $SETTINGS_DIR -Force | Out-Null }
-    try { $s | ConvertTo-Json | Set-Content $SETTINGS_FILE -Encoding UTF8 } catch {}
+    try { $s | ConvertTo-Json -Depth 4 | Set-Content $SETTINGS_FILE -Encoding UTF8 } catch {}
 }
 
 function To-WslPath([string]$p) {
@@ -233,17 +239,31 @@ $gbHex.Location = New-Object System.Drawing.Point(12, 130)
 $gbHex.Size = New-Object System.Drawing.Size(790, 62)
 $gbHex.Anchor = "Top,Left,Right"
 
-$txtHex = New-Object System.Windows.Forms.TextBox
-$txtHex.Location = New-Object System.Drawing.Point(12, 24)
-$txtHex.Size = New-Object System.Drawing.Size(660, 24)
-$txtHex.Text = $script:settings.Hex
+$cmbHex = New-Object System.Windows.Forms.ComboBox
+$cmbHex.Location = New-Object System.Drawing.Point(12, 24)
+$cmbHex.Size = New-Object System.Drawing.Size(520, 24)
+$cmbHex.DropDownStyle = "DropDown"          # editable, and a pick list
+$cmbHex.AutoCompleteMode = "SuggestAppend"
+$cmbHex.AutoCompleteSource = "ListItems"
+$cmbHex.Text = $script:settings.Hex
 
 $btnBrowseHex = New-Object System.Windows.Forms.Button
 $btnBrowseHex.Text = "Browse..."
-$btnBrowseHex.Location = New-Object System.Drawing.Point(680, 23)
-$btnBrowseHex.Size = New-Object System.Drawing.Size(96, 26)
+$btnBrowseHex.Location = New-Object System.Drawing.Point(540, 23)
+$btnBrowseHex.Size = New-Object System.Drawing.Size(84, 26)
 
-$gbHex.Controls.AddRange(@($txtHex, $btnBrowseHex))
+$btnRescanHex = New-Object System.Windows.Forms.Button
+$btnRescanHex.Text = "Rescan"
+$btnRescanHex.Location = New-Object System.Drawing.Point(630, 23)
+$btnRescanHex.Size = New-Object System.Drawing.Size(84, 26)
+
+$chkFollow = New-Object System.Windows.Forms.CheckBox
+$chkFollow.Text = "Follow build"
+$chkFollow.Checked = $true
+$chkFollow.Location = New-Object System.Drawing.Point(724, 26)
+$chkFollow.Size = New-Object System.Drawing.Size(100, 22)
+
+$gbHex.Controls.AddRange(@($cmbHex, $btnBrowseHex, $btnRescanHex, $chkFollow))
 
 $btnBuildFlash = New-Object System.Windows.Forms.Button
 $btnBuildFlash.Text = "Build && Flash"
@@ -289,6 +309,70 @@ $txtLog.ForeColor = [System.Drawing.Color]::FromArgb(215, 215, 220)
 $form.Controls.AddRange(@($lblState, $lblDetail, $btnRefresh, $btnAttach,
                           $gbProject, $gbHex, $btnBuildFlash, $btnFlashOnly,
                           $btnSerial, $btnOpenDir, $lblHint, $txtLog))
+
+# ----------------------------------------------------------------- firmware list
+$script:suppress = $false
+
+function Set-HexValue([string]$v, [switch]$UserPicked) {
+    $script:suppress = $true
+    $cmbHex.Text = $v
+    $script:suppress = $false
+    if ($UserPicked) {
+        # an explicit pick means "do not overwrite this on build"
+        $chkFollow.Checked = $false
+        Add-RecentHex $v
+        Save-CurrentSettings
+    }
+}
+
+function Add-RecentHex([string]$v) {
+    if (-not $v) { return }
+    $list = @($script:settings.Recent)
+    if ($list -notcontains $v) { $list = @($v) + $list }
+    $script:settings.Recent = @($list | Select-Object -First 12)
+}
+
+function Save-CurrentSettings {
+    $script:settings.Hex    = $cmbHex.Text.Trim()
+    $script:settings.Follow = [bool]$chkFollow.Checked
+    Save-Settings $script:settings
+}
+
+# output folder(s) for the currently selected project
+function Get-OutputDirs {
+    $dirs = @()
+    $p = $txtProject.Text.Trim()
+    if ($p) {
+        $base = Split-Path $p -Parent
+        $dirs += (Join-Path $base "..\OBJ")
+        $dirs += (Join-Path $base "OBJ")
+        $dirs += (Join-Path $base "Objects")
+    }
+    return $dirs | Where-Object { Test-Path $_ } | ForEach-Object { (Resolve-Path $_).Path } | Select-Object -Unique
+}
+
+function Refresh-HexList {
+    $cur = $cmbHex.Text.Trim()
+    $items = New-Object System.Collections.ArrayList
+
+    # 1) every .hex in the project output folder, newest first
+    foreach ($d in (Get-OutputDirs)) {
+        Get-ChildItem $d -Filter *.hex -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending |
+            ForEach-Object { if ($items -notcontains $_.FullName) { [void]$items.Add($_.FullName) } }
+    }
+    # 2) recently used
+    foreach ($r in @($script:settings.Recent)) {
+        if ($r -and $items -notcontains $r) { [void]$items.Add($r) }
+    }
+
+    $script:suppress = $true
+    $cmbHex.Items.Clear()
+    foreach ($i in $items) { [void]$cmbHex.Items.Add($i) }
+    if ($cur) { $cmbHex.Text = $cur }
+    elseif ($items.Count -gt 0) { $cmbHex.Text = $items[0] }
+    $script:suppress = $false
+}
 
 function Log([string]$t, [string]$lvl = "info") {
     $p = switch ($lvl) { "ok" { "[+]" } "err" { "[!]" } "warn" { "[*]" } default { "   " } }
@@ -359,8 +443,20 @@ function Do-Build {
     }
     $hexFound = $cand | Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if ($hexFound) {
-        $txtHex.Text = $hexFound.FullName
         Log ("Build OK, HEX: " + $hexFound.FullName + "  (" + [math]::Round($hexFound.Length/1KB,1) + " KB)") "ok"
+        Add-RecentHex $hexFound.FullName
+        Refresh-HexList
+
+        if ($chkFollow.Checked) {
+            Set-HexValue $hexFound.FullName
+            Log "  using this build output" "ok"
+        } elseif ($cmbHex.Text.Trim() -ne $hexFound.FullName) {
+            Log ("  build output is " + $hexFound.FullName) "warn"
+            Log ("  keeping your selection: " + (Split-Path $cmbHex.Text.Trim() -Leaf) +
+                 "   (tick 'Follow build' to use the new output)") "warn"
+        } else {
+            Set-HexValue $hexFound.FullName
+        }
         return $true
     }
     Log "Build finished but no .hex found - is 'Create HEX File' enabled in Options for Target?" "err"
@@ -368,8 +464,10 @@ function Do-Build {
 }
 
 function Do-Flash {
-    $hexFile = $txtHex.Text.Trim()
+    $hexFile = $cmbHex.Text.Trim()
+    if (-not $hexFile) { Log "Pick a .hex firmware first." "err"; return }
     if (-not (Test-Path $hexFile)) { Log "Firmware not found: $hexFile" "err"; return }
+    Save-CurrentSettings
 
     $tty = Ensure-Tty 6
     if (-not $tty) {
@@ -436,21 +534,46 @@ $btnBrowseProj.Add_Click({
         $txtProject.Text = $dlg.FileName
         $script:settings.Project = $dlg.FileName
         Save-Settings $script:settings
+        Refresh-HexList          # the output folder changed
     }
 })
 
 $btnBrowseHex.Add_Click({
     $dlg = New-Object System.Windows.Forms.OpenFileDialog
     $dlg.Filter = "Firmware (*.hex;*.bin)|*.hex;*.bin|All files (*.*)|*.*"
+    $dirs = @(Get-OutputDirs)
+    if ($dirs.Count -gt 0) { $dlg.InitialDirectory = $dirs[0] }
+    elseif ($Hex) { $dlg.InitialDirectory = (Split-Path $Hex -Parent) }
     if ($dlg.ShowDialog() -eq "OK") {
-        $txtHex.Text = $dlg.FileName
-        $script:settings.Hex = $dlg.FileName
-        Save-Settings $script:settings
+        Set-HexValue $dlg.FileName -UserPicked
+        Refresh-HexList
+        Set-HexValue $dlg.FileName
+        Log ("Selected firmware: " + (Split-Path $dlg.FileName -Leaf)) "ok"
     }
 })
 
+$btnRescanHex.Add_Click({
+    Refresh-HexList
+    Log ("Firmware list refreshed: " + $cmbHex.Items.Count + " .hex file(s) - use the drop-down to switch") "ok"
+})
+
+$chkFollow.Add_CheckedChanged({
+    if ($script:suppress) { return }
+    if ($chkFollow.Checked) { Log "'Follow build' ON - after a build the new output is selected" "ok" }
+    else { Log "'Follow build' OFF - a build will not change your selection" "warn" }
+    Save-CurrentSettings
+})
+
+$cmbHex.Add_SelectionChangeCommitted({
+    if ($script:suppress) { return }
+    $chkFollow.Checked = $false
+    Add-RecentHex $cmbHex.Text.Trim()
+    Save-CurrentSettings
+    Log ("Switched firmware to: " + (Split-Path $cmbHex.Text.Trim() -Leaf)) "ok"
+})
+
 $btnOpenDir.Add_Click({
-    $h = $txtHex.Text.Trim()
+    $h = $cmbHex.Text.Trim()
     if ($h) { $d = Split-Path $h -Parent; if (Test-Path $d) { Start-Process explorer.exe $d; return } }
     $p = $txtProject.Text.Trim()
     if ($p) { $d = Split-Path $p -Parent; if (Test-Path $d) { Start-Process explorer.exe $d } }
@@ -481,19 +604,30 @@ $timer.Add_Tick({ if (-not $script:busy) { Update-Status 1 } })
 
 $form.Add_Shown({
     $script:app = $form
+    # restore previous selection
+    $chkFollow.Checked = if ($null -ne $script:settings.Follow) { [bool]$script:settings.Follow } else { $true }
+    Refresh-HexList
+    if ($script:settings.Hex) { Set-HexValue $script:settings.Hex }
+
     Log "STM32 Flash Assistant"
-    Log "  Keil : $Uv4"
-    Log "  WSL  : $DistroName"
+    Log "  Keil  : $Uv4"
+    Log "  WSL   : $DistroName"
     Log "  usbipd: $USBD"
+    Log ("  firmware: " + $cmbHex.Text + "   (" + $cmbHex.Items.Count + " available, use the drop-down to switch)")
     Log ""
     Update-Status 3
     $timer.Start()
 })
 
-$form.Add_FormClosing({ $timer.Stop() })
+$form.Add_FormClosing({
+    $timer.Stop()
+    Save-CurrentSettings
+})
 
 # ----------------------------------------------------------------- self test
 if ($SelfTest) {
+    $chkFollow.Checked = if ($null -ne $script:settings.Follow) { [bool]$script:settings.Follow } else { $true }
+    Refresh-HexList
     Write-Host "SelfTest: form constructed OK"
     Write-Host ("  Size            : " + $form.Size)
     Write-Host ("  Controls        : " + $form.Controls.Count)
@@ -505,6 +639,9 @@ if ($SelfTest) {
     Write-Host ("  USB state       : " + (Get-UsbInfo).State)
     Write-Host ("  Project setting : " + $script:settings.Project)
     Write-Host ("  Hex setting     : " + $script:settings.Hex)
+    Write-Host ("  Hex items       : " + $cmbHex.Items.Count)
+    Write-Host ("  Hex selected    : " + $cmbHex.Text)
+    Write-Host ("  Follow build    : " + $chkFollow.Checked)
     $form.Dispose()
     exit 0
 }

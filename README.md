@@ -295,10 +295,16 @@ picocom /dev/ttyUSB0 -b 115200     # exit: Ctrl+A, Ctrl+X
 | **Refresh** | re-read the usbipd state and the WSL tty |
 | **Attach (admin)** | self-elevates, then `bind` + `attach --auto-attach` |
 | **Browse…** (project) | pick any `.uvprojx`; the path is remembered in `%APPDATA%\keil-arm64-flash\settings.json` |
-| **Build & Flash** | run `UV4 -b`, take the newest `.hex` from the output folder, flash it |
+| **Firmware drop-down** | lists every `.hex` in the project's output folder plus the last 12 you used; the field is editable, so any path can be pasted |
+| **Browse…** (firmware) | pick a `.hex` / `.bin` from anywhere |
+| **Rescan** | re-read the output folder after an external build |
+| **Follow build** | ticked: a build selects its own output. Unticked: a build leaves your selection alone |
+| **Build & Flash** | run `UV4 -b`, then flash (which firmware is used depends on *Follow build*) |
 | **Flash only** | skip the build |
 | **Serial monitor** | open `picocom` on the tty in its own console window |
 | **Open output dir** | reveal the folder holding the `.hex` |
+
+Picking a firmware by hand untickes **Follow build** automatically, so a later build cannot silently replace it — the log says which file was kept and where the fresh build output went. The selection and the tick state persist across launches.
 
 Two behaviours worth knowing:
 

@@ -295,10 +295,16 @@ picocom /dev/ttyUSB0 -b 115200     # 退出：Ctrl+A 然后 Ctrl+X
 | **Refresh** | 重新读取 usbipd 状态和 WSL 里的 tty |
 | **Attach (admin)** | 自己申请提权，然后 `bind` + `attach --auto-attach` |
 | **Browse…**（工程） | 选任意 `.uvprojx`；路径记在 `%APPDATA%\keil-arm64-flash\settings.json` |
-| **Build & Flash** | 跑 `UV4 -b`，从输出目录取最新的 `.hex` 烧进去 |
+| **固件下拉框** | 列出工程输出目录里所有 `.hex`，外加最近用过的 12 个；字段可编辑，任意路径都能粘进去 |
+| **Browse…**（固件） | 从任意位置选 `.hex` / `.bin` |
+| **Rescan** | 在外部编译之后重新扫描输出目录 |
+| **Follow build** | 勾上：编译后自动选用本次产物。不勾：编译不动你的选择 |
+| **Build & Flash** | 跑 `UV4 -b` 再烧录（用哪个固件取决于 *Follow build*） |
 | **Flash only** | 不重新编译 |
 | **Serial monitor** | 另开一个控制台窗口跑 `picocom` |
 | **Open output dir** | 打开放着 `.hex` 的目录 |
+
+手动选过固件之后，**Follow build 会自动取消勾选**，这样后续编译不会悄悄把文件换掉——日志里会写明保留了哪个文件、新产物在哪。选择结果和勾选状态都会跨次启动保留。
 
 两个值得一提的行为：
 
