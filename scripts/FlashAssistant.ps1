@@ -1,0 +1,513 @@
+<#
+.SYNOPSIS
+    Graphical front-end for building and flashing STM32 firmware on Windows on ARM.
+
+.DESCRIPTION
+    A small WinForms window that wraps the same approach used by the command-line
+    scripts: Keil MDK compiles (x86 code runs under emulation), usbipd forwards the
+    USB device into WSL2, and stm32flash / dfu-util do the actual writing from there.
+    No vendor kernel driver is ever installed on Windows.
+
+    The window shows the device state, lets you pick a Keil project, and runs the
+    build + flash cycle with a live log. Before flashing it probes the serial port:
+    if the target application is still running, BOOT0 is not set and the flash would
+    fail with "Failed to init device", so it stops and tells you instead.
+
+    Requires:
+      * Keil MDK installed (default C:\Keil_v5, override with -Uv4)
+      * usbipd-win ARM64 build, service running
+      * a WSL2 distribution prepared with stm32flash (see Install-WslStm32Env.ps1)
+
+.PARAMETER Project
+    Path to a Keil .uvprojx. Remembered between runs when omitted.
+
+.PARAMETER Hex
+    Path to a .hex to flash. Remembered between runs when omitted.
+
+.PARAMETER DistroName
+    WSL distribution to use. Default: Ubuntu2204
+
+.PARAMETER Uv4
+    Path to UV4.exe. Default: C:\Keil_v5\UV4\UV4.exe
+
+.PARAMETER AttachOnly
+    Internal: bind + attach the device and exit. Used for self-elevation.
+
+.PARAMETER BusId
+    Device BUSID for -AttachOnly (e.g. 2-1). Auto-detected when omitted.
+
+.PARAMETER SelfTest
+    Build the form, print diagnostics, and exit without showing it.
+
+.EXAMPLE
+    .\FlashAssistant.ps1
+
+.EXAMPLE
+    .\FlashAssistant.ps1 -Project C:\work\firmware\USER\app.uvprojx
+#>
+[CmdletBinding()]
+param(
+    [string]$Project,
+    [string]$Hex,
+    [string]$DistroName = "Ubuntu2204",
+    [string]$Uv4 = "C:\Keil_v5\UV4\UV4.exe",
+    [switch]$AttachOnly,
+    [string]$BusId,
+    [switch]$SelfTest
+)
+
+$ErrorActionPreference = "Continue"
+
+$USBD   = "C:\Program Files\usbipd-win\usbipd.exe"
+# UV4 lives in <keil>\UV4\UV4.exe ; the compiler is in <keil>\ARM\ARMCC\bin
+$KEIL_ROOT = Split-Path (Split-Path $Uv4 -Parent) -Parent
+$FROMELF = Join-Path $KEIL_ROOT "ARM\ARMCC\bin\fromelf.exe"
+$SETTINGS_DIR = Join-Path $env:APPDATA "keil-arm64-flash"
+$SETTINGS_FILE = Join-Path $SETTINGS_DIR "settings.json"
+$BUILD_LOG = Join-Path $env:TEMP "keil_arm64_build.log"
+
+function Say($m, $c = "Gray") { Write-Host $m -ForegroundColor $c }
+
+# ----------------------------------------------------------------- settings
+function Load-Settings {
+    if (Test-Path $SETTINGS_FILE) {
+        try { return Get-Content $SETTINGS_FILE -Raw | ConvertFrom-Json } catch {}
+    }
+    return [pscustomobject]@{ Project = ""; Hex = ""; Distro = "Ubuntu2204" }
+}
+
+function Save-Settings($s) {
+    if (-not (Test-Path $SETTINGS_DIR)) { New-Item -ItemType Directory -Path $SETTINGS_DIR -Force | Out-Null }
+    try { $s | ConvertTo-Json | Set-Content $SETTINGS_FILE -Encoding UTF8 } catch {}
+}
+
+function To-WslPath([string]$p) {
+    if ([string]::IsNullOrWhiteSpace($p)) { return "" }
+    $full = $p
+    try { $full = (Resolve-Path -LiteralPath $p -ErrorAction Stop).Path } catch {}
+    return "/mnt/" + $full.Substring(0,1).ToLower() + ($full.Substring(2) -replace '\\','/')
+}
+
+function Run-Cmd {
+    param([string]$File, [string[]]$ArgList, [int]$TimeoutSec = 0, [scriptblock]$OnTick)
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $File
+    $psi.Arguments = ($ArgList | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' '
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+    $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+    $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+    try { $p = [System.Diagnostics.Process]::Start($psi) } catch { return @{ Code = -1; Out = $_.Exception.Message } }
+
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while (-not $p.HasExited) {
+        if ($OnTick) { & $OnTick } elseif ($null -ne $script:app) { [System.Windows.Forms.Application]::DoEvents() }
+        Start-Sleep -Milliseconds 40
+        if ($TimeoutSec -gt 0 -and $sw.Elapsed.TotalSeconds -gt $TimeoutSec) { try { $p.Kill() } catch {}; break }
+    }
+    $o = ""; $e = ""
+    try { $o = $p.StandardOutput.ReadToEnd() } catch {}
+    try { $e = $p.StandardError.ReadToEnd() } catch {}
+    $code = -1
+    try { $code = $p.ExitCode } catch {}
+    return @{ Code = $code; Out = ($o + $e) }
+}
+
+function Wsl-Cmd([string]$Command) {
+    $r = Run-Cmd "wsl.exe" @("-d", $DistroName, "-e", "bash", "-c", $Command) 60
+    return ([string]$r.Out).Trim()
+}
+
+function Get-UsbInfo {
+    if (-not (Test-Path $USBD)) { return [pscustomobject]@{ Found = $false; State = "usbipd not installed"; BusId = "" } }
+    $r = Run-Cmd $USBD @("list") 30
+    foreach ($line in ([string]$r.Out -split "`r?`n")) {
+        if ($line -match '^\s*(\d+-\d+)\s+([0-9a-fA-F]{4}:[0-9a-fA-F]{4})\s+(.+?)\s*$') {
+            $state = "Unknown"
+            if ($line -match '(Not shared|Shared|Attached)') { $state = $Matches[1] }
+            return [pscustomobject]@{ Found = $true; State = $state; BusId = $Matches[1]; Id = $Matches[2] }
+        }
+    }
+    return [pscustomobject]@{ Found = $false; State = "no USB serial device"; BusId = ""; Id = "" }
+}
+
+function Ensure-Tty([int]$Retries = 1) {
+    for ($i = 1; $i -le $Retries; $i++) {
+        Run-Cmd "wsl.exe" @("-d", $DistroName, "-e", "bash", "-c", "modprobe ch341") 20 | Out-Null
+        $t = Wsl-Cmd "ls /dev/ttyUSB* /dev/ttyACM* 2>/dev/null | head -1"
+        if ($t) { return $t }
+        Start-Sleep -Milliseconds 600
+    }
+    return ""
+}
+
+function Test-AppRunning([string]$tty) {
+    $r = Run-Cmd "wsl.exe" @("-d", $DistroName, "-e", "bash", "-c", "stty -F $tty 115200 raw -echo 2>/dev/null; timeout 2 cat $tty") 30
+    return (([string]$r.Out).Trim().Length -gt 0)
+}
+
+# ----------------------------------------------------------------- attach-only mode
+if ($AttachOnly) {
+    Say "Attach helper (elevated)" Cyan
+    if (-not $BusId) {
+        $info = Get-UsbInfo
+        if (-not $info.Found) { Say "No USB serial device found." Red; exit 1 }
+        $BusId = $info.BusId
+    }
+    Say "BUSID: $BusId"
+    Run-Cmd $USBD @("bind", "--busid", $BusId) 30 | Out-Null
+    Run-Cmd "wsl.exe" @("-d", $DistroName, "-e", "bash", "-c", "echo ok") 30 | Out-Null
+    $r = Run-Cmd $USBD @("attach", "--wsl", "--busid", $BusId, "--auto-attach") 40
+    Say ([string]$r.Out)
+    if ($r.Code -eq 0) { Say "Attached." Green } else { Say "attach failed (exit $($r.Code))" Red }
+    Start-Sleep -Milliseconds 800
+    exit $r.Code
+}
+
+# ----------------------------------------------------------------- gui
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+$script:app        = $null
+$script:busy       = $false
+$script:settings   = Load-Settings
+if ($Project) { $script:settings.Project = $Project }
+if ($Hex)     { $script:settings.Hex = $Hex }
+if ($DistroName -ne "Ubuntu2204") { $script:settings.Distro = $DistroName }
+
+$form = New-Object System.Windows.Forms.Form
+$form.Text = "STM32 Flash Assistant  (Windows on ARM)"
+$form.Size = New-Object System.Drawing.Size(820, 640)
+$form.StartPosition = "CenterScreen"
+$form.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+$form.MinimumSize = New-Object System.Drawing.Size(700, 520)
+
+$lblState = New-Object System.Windows.Forms.Label
+$lblState.Text = "Checking device..."
+$lblState.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+$lblState.AutoSize = $true
+$lblState.Location = New-Object System.Drawing.Point(14, 12)
+
+$lblDetail = New-Object System.Windows.Forms.Label
+$lblDetail.Text = ""
+$lblDetail.AutoSize = $true
+$lblDetail.ForeColor = [System.Drawing.Color]::DimGray
+$lblDetail.Location = New-Object System.Drawing.Point(14, 36)
+
+$btnRefresh = New-Object System.Windows.Forms.Button
+$btnRefresh.Text = "Refresh"
+$btnRefresh.Size = New-Object System.Drawing.Size(90, 28)
+$btnRefresh.Location = New-Object System.Drawing.Point(600, 12)
+$btnRefresh.Anchor = "Top,Right"
+
+$btnAttach = New-Object System.Windows.Forms.Button
+$btnAttach.Text = "Attach (admin)"
+$btnAttach.Size = New-Object System.Drawing.Size(110, 28)
+$btnAttach.Location = New-Object System.Drawing.Point(696, 12)
+$btnAttach.Anchor = "Top,Right"
+$btnAttach.Enabled = $false
+
+$gbProject = New-Object System.Windows.Forms.GroupBox
+$gbProject.Text = "Keil project"
+$gbProject.Location = New-Object System.Drawing.Point(12, 62)
+$gbProject.Size = New-Object System.Drawing.Size(790, 62)
+$gbProject.Anchor = "Top,Left,Right"
+
+$txtProject = New-Object System.Windows.Forms.TextBox
+$txtProject.Location = New-Object System.Drawing.Point(12, 24)
+$txtProject.Size = New-Object System.Drawing.Size(660, 24)
+$txtProject.Text = $script:settings.Project
+
+$btnBrowseProj = New-Object System.Windows.Forms.Button
+$btnBrowseProj.Text = "Browse..."
+$btnBrowseProj.Location = New-Object System.Drawing.Point(680, 23)
+$btnBrowseProj.Size = New-Object System.Drawing.Size(96, 26)
+
+$gbProject.Controls.AddRange(@($txtProject, $btnBrowseProj))
+
+$gbHex = New-Object System.Windows.Forms.GroupBox
+$gbHex.Text = "Firmware (.hex)"
+$gbHex.Location = New-Object System.Drawing.Point(12, 130)
+$gbHex.Size = New-Object System.Drawing.Size(790, 62)
+$gbHex.Anchor = "Top,Left,Right"
+
+$txtHex = New-Object System.Windows.Forms.TextBox
+$txtHex.Location = New-Object System.Drawing.Point(12, 24)
+$txtHex.Size = New-Object System.Drawing.Size(660, 24)
+$txtHex.Text = $script:settings.Hex
+
+$btnBrowseHex = New-Object System.Windows.Forms.Button
+$btnBrowseHex.Text = "Browse..."
+$btnBrowseHex.Location = New-Object System.Drawing.Point(680, 23)
+$btnBrowseHex.Size = New-Object System.Drawing.Size(96, 26)
+
+$gbHex.Controls.AddRange(@($txtHex, $btnBrowseHex))
+
+$btnBuildFlash = New-Object System.Windows.Forms.Button
+$btnBuildFlash.Text = "Build && Flash"
+$btnBuildFlash.Location = New-Object System.Drawing.Point(12, 202)
+$btnBuildFlash.Size = New-Object System.Drawing.Size(150, 38)
+$btnBuildFlash.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 215)
+$btnBuildFlash.ForeColor = [System.Drawing.Color]::White
+$btnBuildFlash.FlatStyle = "Flat"
+
+$btnFlashOnly = New-Object System.Windows.Forms.Button
+$btnFlashOnly.Text = "Flash only"
+$btnFlashOnly.Location = New-Object System.Drawing.Point(172, 202)
+$btnFlashOnly.Size = New-Object System.Drawing.Size(110, 38)
+
+$btnSerial = New-Object System.Windows.Forms.Button
+$btnSerial.Text = "Serial monitor"
+$btnSerial.Location = New-Object System.Drawing.Point(292, 202)
+$btnSerial.Size = New-Object System.Drawing.Size(120, 38)
+
+$btnOpenDir = New-Object System.Windows.Forms.Button
+$btnOpenDir.Text = "Open output dir"
+$btnOpenDir.Location = New-Object System.Drawing.Point(422, 202)
+$btnOpenDir.Size = New-Object System.Drawing.Size(120, 38)
+
+$lblHint = New-Object System.Windows.Forms.Label
+$lblHint.Text = "BOOT0 = 1 + press RESET before flashing    |    BOOT0 = 0 + RESET after"
+$lblHint.ForeColor = [System.Drawing.Color]::FromArgb(150, 90, 20)
+$lblHint.AutoSize = $true
+$lblHint.Location = New-Object System.Drawing.Point(556, 214)
+$lblHint.Anchor = "Top,Right"
+
+$txtLog = New-Object System.Windows.Forms.TextBox
+$txtLog.Multiline = $true
+$txtLog.ScrollBars = "Vertical"
+$txtLog.ReadOnly = $true
+$txtLog.Location = New-Object System.Drawing.Point(12, 250)
+$txtLog.Size = New-Object System.Drawing.Size(780, 336)
+$txtLog.Anchor = "Top,Bottom,Left,Right"
+$txtLog.Font = New-Object System.Drawing.Font("Consolas", 9)
+$txtLog.BackColor = [System.Drawing.Color]::FromArgb(28, 28, 32)
+$txtLog.ForeColor = [System.Drawing.Color]::FromArgb(215, 215, 220)
+
+$form.Controls.AddRange(@($lblState, $lblDetail, $btnRefresh, $btnAttach,
+                          $gbProject, $gbHex, $btnBuildFlash, $btnFlashOnly,
+                          $btnSerial, $btnOpenDir, $lblHint, $txtLog))
+
+function Log([string]$t, [string]$lvl = "info") {
+    $p = switch ($lvl) { "ok" { "[+]" } "err" { "[!]" } "warn" { "[*]" } default { "   " } }
+    $txtLog.AppendText(((Get-Date).ToString("HH:mm:ss")) + " $p $t`r`n")
+    $txtLog.SelectionStart = $txtLog.TextLength
+    $txtLog.ScrollToCaret()
+    [System.Windows.Forms.Application]::DoEvents()
+}
+
+function Set-State([string]$text, $color, [string]$detail) {
+    $lblState.Text = $text
+    $lblState.ForeColor = $color
+    $lblDetail.Text = $detail
+}
+
+function Update-Status([int]$retries = 1) {
+    $info = Get-UsbInfo
+    $tty = ""
+    if ($info.Found -and $info.State -eq "Attached") { $tty = Ensure-Tty $retries }
+
+    if ($tty) {
+        Set-State "Device ready: $tty" ([System.Drawing.Color]::FromArgb(0,140,60)) `
+                  "$($info.Id)  BUSID=$($info.BusId)  attached   -   ready to flash"
+        $btnAttach.Enabled = $false
+        $btnBuildFlash.Enabled = $true
+        $btnFlashOnly.Enabled = $true
+        $btnSerial.Enabled = $true
+        return
+    }
+    if (-not $info.Found) {
+        Set-State "No USB serial device" ([System.Drawing.Color]::FromArgb(190,40,40)) `
+                  "check: board powered, using its UART/USB port, and the cable carries data"
+        $btnAttach.Enabled = $false
+        $btnBuildFlash.Enabled = $false
+        $btnFlashOnly.Enabled = $false
+        $btnSerial.Enabled = $false
+        return
+    }
+    Set-State "Device found, not attached to WSL   [$($info.State)]" ([System.Drawing.Color]::FromArgb(200,130,0)) `
+              "click Attach (admin) and confirm the UAC prompt"
+    $btnAttach.Enabled = $true
+    $btnBuildFlash.Enabled = $false
+    $btnFlashOnly.Enabled = $false
+    $btnSerial.Enabled = $false
+}
+
+function Do-Build {
+    $proj = $txtProject.Text.Trim()
+    if (-not $proj) { Log "Pick a .uvprojx first." "err"; return $false }
+    if (-not (Test-Path $proj)) { Log "Project not found: $proj" "err"; return $false }
+    if (-not (Test-Path $Uv4)) { Log "UV4.exe not found: $Uv4  (use -Uv4)" "err"; return $false }
+
+    Log "Building $([System.IO.Path]::GetFileName($proj)) ..."
+    if (Test-Path $BUILD_LOG) { Remove-Item $BUILD_LOG -Force -ErrorAction SilentlyContinue }
+    $r = Run-Cmd $Uv4 @("-b", $proj, "-j0", "-o", $BUILD_LOG) 0
+
+    if (Test-Path $BUILD_LOG) {
+        foreach ($line in (Get-Content $BUILD_LOG)) {
+            if ($line -match "Program Size|error|Error\(s\)|warning\(s\)") { Log ("  " + $line.Trim()) }
+        }
+    }
+    if ($r.Code -ge 2) { Log "Build failed (exit $($r.Code))" "err"; return $false }
+
+    $objDir = Join-Path (Split-Path $proj -Parent) "..\OBJ"
+    $cand = @()
+    foreach ($d in @((Join-Path (Split-Path $proj -Parent) "..\OBJ"), (Join-Path (Split-Path $proj -Parent) "OBJ"))) {
+        if (Test-Path $d) { $cand += (Get-ChildItem $d -Filter *.hex -ErrorAction SilentlyContinue) }
+    }
+    $hexFound = $cand | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($hexFound) {
+        $txtHex.Text = $hexFound.FullName
+        Log ("Build OK, HEX: " + $hexFound.FullName + "  (" + [math]::Round($hexFound.Length/1KB,1) + " KB)") "ok"
+        return $true
+    }
+    Log "Build finished but no .hex found - is 'Create HEX File' enabled in Options for Target?" "err"
+    return $false
+}
+
+function Do-Flash {
+    $hexFile = $txtHex.Text.Trim()
+    if (-not (Test-Path $hexFile)) { Log "Firmware not found: $hexFile" "err"; return }
+
+    $tty = Ensure-Tty 6
+    if (-not $tty) {
+        Log "No /dev/ttyUSB* inside WSL." "err"
+        Log "  run Attach (admin) first, or check the board is plugged in" "warn"
+        Update-Status
+        return
+    }
+
+    Log "Checking whether the target is still running..."
+    if (Test-AppRunning $tty) {
+        Log "The application is still running - BOOT0 is still 0, flashing will fail." "err"
+        Log "  1) set BOOT0 = 1" "warn"
+        Log "  2) press RESET on the board" "warn"
+        Log "  3) click Flash only again" "warn"
+        Log "  (the bootloader is silent; no serial output means you got it)" "warn"
+        return
+    }
+    Log "Serial silent - target looks like it is in the bootloader" "ok"
+
+    Log "Flashing $([System.IO.Path]::GetFileName($hexFile)) to $tty ..."
+    $r = Run-Cmd "wsl.exe" @("-d", $DistroName, "-e", "stm32flash",
+                             "-w", (To-WslPath $hexFile), "-v", "-g", "0x08000000", $tty) 400
+    $last = ""
+    foreach ($line in ([string]$r.Out -split "`r?`n")) {
+        if ($line.Trim()) { $last = $line.Trim() }
+        if ($line -match "Device ID|Flash\s+:|Wrote|Done|Starting|Failed|Error") { Log ("  " + $line.Trim()) }
+    }
+    if ($r.Code -eq 0) {
+        Log "Flash complete. Set BOOT0 = 0 and press RESET." "ok"
+    } else {
+        Log "Flash failed (exit $($r.Code))" "err"
+        Log "  BOOT0 not set / RESET not pressed / port busy / try a lower baud" "warn"
+    }
+}
+
+# ----------------------------------------------------------------- events
+$btnRefresh.Add_Click({ if (-not $script:busy) { Log "Refreshing..."; Update-Status 3 } })
+
+$btnAttach.Add_Click({
+    $script:busy = $true
+    try {
+        Log "Requesting elevation - confirm the UAC prompt..."
+        Start-Process -FilePath "powershell.exe" `
+            -ArgumentList @("-NoProfile","-ExecutionPolicy","Bypass","-File",$PSCommandPath,
+                            "-AttachOnly","-DistroName",$DistroName) -Verb RunAs
+        Log "Elevated helper launched. Waiting..." "warn"
+        for ($i = 0; $i -lt 12; $i++) {
+            Start-Sleep -Milliseconds 1000
+            [System.Windows.Forms.Application]::DoEvents()
+            Update-Status 1
+            if ($lblState.Text -like "Device ready*") { Log "Attached." "ok"; return }
+        }
+        Log "Still not attached - click Refresh in a moment." "warn"
+    } catch {
+        Log "Elevation cancelled: $($_.Exception.Message)" "err"
+    } finally { $script:busy = $false }
+})
+
+$btnBrowseProj.Add_Click({
+    $dlg = New-Object System.Windows.Forms.OpenFileDialog
+    $dlg.Filter = "Keil project (*.uvprojx)|*.uvprojx|All files (*.*)|*.*"
+    if ($dlg.ShowDialog() -eq "OK") {
+        $txtProject.Text = $dlg.FileName
+        $script:settings.Project = $dlg.FileName
+        Save-Settings $script:settings
+    }
+})
+
+$btnBrowseHex.Add_Click({
+    $dlg = New-Object System.Windows.Forms.OpenFileDialog
+    $dlg.Filter = "Firmware (*.hex;*.bin)|*.hex;*.bin|All files (*.*)|*.*"
+    if ($dlg.ShowDialog() -eq "OK") {
+        $txtHex.Text = $dlg.FileName
+        $script:settings.Hex = $dlg.FileName
+        Save-Settings $script:settings
+    }
+})
+
+$btnOpenDir.Add_Click({
+    $h = $txtHex.Text.Trim()
+    if ($h) { $d = Split-Path $h -Parent; if (Test-Path $d) { Start-Process explorer.exe $d; return } }
+    $p = $txtProject.Text.Trim()
+    if ($p) { $d = Split-Path $p -Parent; if (Test-Path $d) { Start-Process explorer.exe $d } }
+})
+
+$btnSerial.Add_Click({
+    $tty = Ensure-Tty 3
+    if (-not $tty) { Log "No serial device in WSL." "err"; return }
+    Log "Opening serial monitor on $tty ..."
+    Start-Process -FilePath "wsl.exe" -ArgumentList @("-d", $DistroName, "-e", "picocom", $tty, "-b", "115200")
+})
+
+$btnBuildFlash.Add_Click({
+    if ($script:busy) { return }
+    $script:busy = $true
+    try { if (Do-Build) { Do-Flash } } finally { $script:busy = $false }
+})
+
+$btnFlashOnly.Add_Click({
+    if ($script:busy) { return }
+    $script:busy = $true
+    try { Do-Flash } finally { $script:busy = $false }
+})
+
+$timer = New-Object System.Windows.Forms.Timer
+$timer.Interval = 7000
+$timer.Add_Tick({ if (-not $script:busy) { Update-Status 1 } })
+
+$form.Add_Shown({
+    $script:app = $form
+    Log "STM32 Flash Assistant"
+    Log "  Keil : $Uv4"
+    Log "  WSL  : $DistroName"
+    Log "  usbipd: $USBD"
+    Log ""
+    Update-Status 3
+    $timer.Start()
+})
+
+$form.Add_FormClosing({ $timer.Stop() })
+
+# ----------------------------------------------------------------- self test
+if ($SelfTest) {
+    Write-Host "SelfTest: form constructed OK"
+    Write-Host ("  Size            : " + $form.Size)
+    Write-Host ("  Controls        : " + $form.Controls.Count)
+    Write-Host ("  Distro          : " + $DistroName)
+    Write-Host ("  UV4 exists      : " + (Test-Path $Uv4))
+    Write-Host ("  usbipd exists   : " + (Test-Path $USBD))
+    Write-Host ("  FromELF exists  : " + (Test-Path $FROMELF))
+    Write-Host ("  Settings file   : " + $SETTINGS_FILE)
+    Write-Host ("  USB state       : " + (Get-UsbInfo).State)
+    Write-Host ("  Project setting : " + $script:settings.Project)
+    Write-Host ("  Hex setting     : " + $script:settings.Hex)
+    $form.Dispose()
+    exit 0
+}
+
+[void]$form.ShowDialog()
+$form.Dispose()

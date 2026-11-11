@@ -282,6 +282,36 @@ dfu-util -a 0 -s 0x08000000:leave -D /mnt/c/path/to/Template.bin
 picocom /dev/ttyUSB0 -b 115200     # exit: Ctrl+A, Ctrl+X
 ```
 
+### 6.1 Graphical assistant
+
+`scripts/FlashAssistant.ps1` puts the same cycle in a window, for when you would rather click than type:
+
+```powershell
+.\scripts\FlashAssistant.ps1
+```
+
+| Control | Action |
+|---|---|
+| **Refresh** | re-read the usbipd state and the WSL tty |
+| **Attach (admin)** | self-elevates, then `bind` + `attach --auto-attach` |
+| **Browse…** (project) | pick any `.uvprojx`; the path is remembered in `%APPDATA%\keil-arm64-flash\settings.json` |
+| **Build & Flash** | run `UV4 -b`, take the newest `.hex` from the output folder, flash it |
+| **Flash only** | skip the build |
+| **Serial monitor** | open `picocom` on the tty in its own console window |
+| **Open output dir** | reveal the folder holding the `.hex` |
+
+Two behaviours worth knowing:
+
+- **Pre-flight BOOT0 check.** Before writing, it listens on the port for 2 seconds.
+  If the target application is still running, BOOT0 is not set and `stm32flash` would
+  fail with `Failed to init device` — so it stops and tells you which jumper to move
+  instead of burning an attempt on a guaranteed failure.
+- **Nothing is hard-coded.** It is not tied to any particular project; point it at your
+  own `.uvprojx`.
+
+Plain PowerShell 5.1 + WinForms — no compilation, no extra dependencies. `-SelfTest`
+builds the form, prints diagnostics and exits, which is handy as a smoke check.
+
 ## 7. Troubleshooting catalogue
 
 These are the failures actually hit while building this setup. Most of them produce misleading error text.

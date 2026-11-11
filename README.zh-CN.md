@@ -282,6 +282,34 @@ dfu-util -a 0 -s 0x08000000:leave -D /mnt/c/path/to/Template.bin
 picocom /dev/ttyUSB0 -b 115200     # 退出：Ctrl+A 然后 Ctrl+X
 ```
 
+### 6.1 图形界面
+
+`scripts/FlashAssistant.ps1` 把同一套流程包进一个窗口，适合不想敲命令的时候：
+
+```powershell
+.\scripts\FlashAssistant.ps1
+```
+
+| 控件 | 作用 |
+|---|---|
+| **Refresh** | 重新读取 usbipd 状态和 WSL 里的 tty |
+| **Attach (admin)** | 自己申请提权，然后 `bind` + `attach --auto-attach` |
+| **Browse…**（工程） | 选任意 `.uvprojx`；路径记在 `%APPDATA%\keil-arm64-flash\settings.json` |
+| **Build & Flash** | 跑 `UV4 -b`，从输出目录取最新的 `.hex` 烧进去 |
+| **Flash only** | 不重新编译 |
+| **Serial monitor** | 另开一个控制台窗口跑 `picocom` |
+| **Open output dir** | 打开放着 `.hex` 的目录 |
+
+两个值得一提的行为：
+
+- **烧录前的 BOOT0 体检。** 写入之前先监听串口 2 秒。如果目标程序还在跑，说明
+  BOOT0 没拨，`stm32flash` 必然报 `Failed to init device`——它会先停下来告诉你该挪哪个
+  跳线帽，而不是白跑一次注定失败的烧录。
+- **没有任何硬编码。** 它不绑死某个工程，指向你自己的 `.uvprojx` 就行。
+
+纯 PowerShell 5.1 + WinForms，不用编译、没有额外依赖。带 `-SelfTest` 参数时会构建界面、
+打印诊断信息后退出，可以拿来做冒烟检查。
+
 ## 7. 踩坑目录
 
 下面这些都是搭建过程中真实撞到的，而且大多数报错信息都具有误导性。
