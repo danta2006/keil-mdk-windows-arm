@@ -491,7 +491,22 @@ Build in Keil, flash from WSL, read the console from WSL. No vendor driver was e
 - **Emulation is slower.** Expect compiles a little slower than on native x86.
 - **This document does not grant any Keil/ARM/ST license.** Do not redistribute vendor installers or device packs; link to the official pages instead.
 
-## 10. License
+## 10. Companion: USB serial adapters (PL2303)
+
+The sections above cover the generic "hand the USB device to WSL" approach.
+If your adapter uses a **PL2303** chip there is one extra problem: Microsoft's
+WSL2 kernel ships without that driver and modules cannot be added afterwards,
+so the kernel has to be rebuilt once.
+
+Full guide (with measurements, three pitfalls, and a build progress bar) lives in
+**[wsl-usb-serial/](wsl-usb-serial/README.md)**:
+
+- `build-kernel.sh` — build a kernel that adds the PL2303 driver (~50 min, official source tag)
+- `install-modules.sh` — install the matching modules after switching (**skip this and usbipd breaks**)
+- `scripts/` — USB attach, picocom console, XMODEM send
+- `verify.sh` — one command to check the drivers
+
+## 11. License
 
 Text and scripts: **MIT** (see [LICENSE](LICENSE)).
 
