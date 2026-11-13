@@ -328,6 +328,8 @@ These are the failures actually hit while building this setup. Most of them prod
 
 ### 7.1 Keil: `A1067E` + `A1023E` on the startup file
 
+> The causal explanation below is the most likely one, not a proven root cause.
+
 ```
 startup_stm32f40_41xxx.s: Error: A1067E: Output file specified as '..\CORE\startup.s',
   but it has already been specified as '.\objects\startup.o'

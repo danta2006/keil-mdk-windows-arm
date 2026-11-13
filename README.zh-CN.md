@@ -326,6 +326,8 @@ picocom /dev/ttyUSB0 -b 115200     # 退出：Ctrl+A 然后 Ctrl+X
 
 ### 7.1 Keil：启动文件报 `A1067E` + `A1023E`
 
+> 下面这条因果解释只是**最可能的原因**，不是已经证实的根因。
+
 ```
 startup_stm32f40_41xxx.s: Error: A1067E: Output file specified as '..\CORE\startup.s',
   but it has already been specified as '.\objects\startup.o'
