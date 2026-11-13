@@ -1,0 +1,33 @@
+# 把这个文件复制到 .github/workflows/ci.yml 即可启用 CI。
+#
+# 为什么现在不在 .github/ 里：推送用的 Personal Access Token 没有 `workflow`
+# scope，GitHub 拒绝通过 API/推送创建 workflow 文件。给 token 勾上 `workflow`
+# scope，或者直接在网页上新建文件，二者都行。
+
+name: ci
+
+on: [push, pull_request]
+
+jobs:
+  powershell:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - shell: pwsh
+        run: |
+          $fail = $false
+          Get-ChildItem -Recurse -Filter *.ps1 | ForEach-Object {
+            $err = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$err)
+            if ($err) {
+              $fail = $true
+              Write-Host "::error file=$($_.FullName)::$($err[0].Message)"
+            }
+          }
+          if ($fail) { exit 1 }
+
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: shellcheck -S warning wsl-usb-serial/*.sh wsl-usb-serial/scripts/*.sh
