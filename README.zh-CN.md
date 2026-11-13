@@ -1,8 +1,12 @@
 # 在 Windows on ARM（ARM64）上使用 Keil MDK
 
-**用 Windows on ARM 笔记本*编译*并且*烧录* STM32 —— 以及为什么厂商驱动永远装不上。**
+**用 Windows on ARM 笔记本*编译*并且*烧录* STM32 —— 以及为什么厂商驱动（截至 2026-11）仍然装不上。**
 
 [English](README.md)
+
+> **最后验证：** 2026-11-13 · Windows 11（ARM64，8 核）· Keil MDK 5.24 (Lite) ·
+> WSL 内核 6.18.58.1-microsoft-standard-WSL2 · usbipd-win 5.3.0。
+> 文中的版本号是实测时用的版本，更新请以上游发布页为准。
 
 ---
 
@@ -14,7 +18,7 @@
 | 编辑 / 编译 / 链接 / 生成 `.hex` | ✅ | 整条工具链都是用户态 |
 | 用 ST-Link / ULINK / J-Link 烧录 | ❌ | 需要**内核态**驱动 |
 | 用板载 USB 转串口（CH340/CP210x）烧录 | ❌ | 同上 |
-| 用 STM32 内置 USB DFU 烧录 | ❌ | 仍需内核态 WinUSB / ST DFU 驱动 |
+| 用 STM32 内置 USB DFU 烧录 | ❌ | 需要自签 INF 把设备绑到系统自带的 WinUSB（可行，但比 usbipd 麻烦） |
 | **用 WSL2 + usbipd 烧录** | ✅ | 驱动活在 **Linux** 内核里 |
 
 思路：让 Keil 只干它能干的（编译），把设备 I/O 交给 WSL2，通过 USB/IP 透传。Linux 内核是原生 ARM64 构建，串口驱动本来就带——Windows 侧一个驱动都不用装。
@@ -43,7 +47,7 @@ Windows on ARM **不是**在硬件层模拟 x86，而是在**用户态**模拟�
 
 所有调试探针和 USB 转串口芯片提供的都是**内核态** `.sys`，而这些二进制是 x86 或 x64。Windows 在 ARM64 上不会加载它们——也**没有东西能模拟它们**。
 
-同样地，基于 `WinUSB` 的"免驱"方案也没用：即便号称免驱，设备仍需被**绑定**到某个驱动，而构造这个绑定需要一个 `.sys` 与原生架构匹配的 INF。
+同样地，基于 `WinUSB` 的"免驱"方案也不是架构问题：`winusb.sys` 是系统自带、有 ARM64 版本，真正的门槛是要自己签一个 INF 把设备**绑定**上去。
 
 ### 2.1 自己动手验证
 
@@ -101,7 +105,7 @@ WCH CH340 安装包的 `CH341SER.INF` 里只有：
 | 硬装 x86/x64 驱动 | ❌ Windows 直接拒绝，内核架构必须匹配 |
 | x86 虚拟机（VirtualBox / VMware） | ❌ ARM64 宿主不支持 x86 guest |
 | QEMU 全系统模拟 x86 | ⚠️ 能开机，但 USB 透传基本不可用 |
-| Chrome/Edge 的 WebUSB DFU 刷写工具 | ⚠️ **前提**是 DFU 设备已绑定 WinUSB——而这正是缺失的那个驱动 |
+| Chrome/Edge 的 WebUSB DFU 刷写工具 | ⚠️ 原理上可行：`winusb.sys` 是系统自带组件、有 ARM64 版本；门槛在于要用**自签 INF** 把设备绑上去（或开测试模式），比 usbipd 麻烦，且未实测 |
 | ST-Link / ULINK / J-Link | ❌ 厂商工具不支持 ARM 笔记本 |
 | **WSL2 + usbipd-win** | ✅ 推荐 |
 
@@ -374,7 +378,7 @@ Code + RO + RW 约 7.2 KB。Lite 跑小工程没问题，一旦塞字库、文�
 
 ### 7.4 USB-C：能给手机充电、但接上毫无反应的 A 转 C 线
 
-A 转 C 线的 **C 头里有一个 5.1 kΩ 下拉电阻（Rd，接在 CC 脚）**。USB-C 主机口必须先检测到这个电阻，才会打开 VBUS。
+**A 转 C** 是被动线，没有 e-marker：C 头里只有 **Rp（56 kΩ 上拉到 VBUS）**，用来告诉 C 口**设备**"对面有电源"；**Rd（5.1 kΩ 下拉）在设备端**，才是 C 口**主机**开启 VBUS 前要检测的东西。
 
 而充电宝的 **USB-A** 口是无脑输出 5 V 的，**根本不看 CC**。所以：
 
@@ -485,7 +489,7 @@ uptime = 14 s
 ## 9. 适用范围与限制
 
 - **没有在线调试。** 断点/变量监视需要探针驱动，ST-Link 和 ULINK 在这里都用不了。靠串口输出来调试。
-- **CMSIS-DAP 探针可能可用。** CMSIS-DAP 是 HID/WinUSB 类设备，部分探针在 ARM64 上无需厂商驱动即可枚举。本文未验证，但那是通往真正断点调试最有希望的一条路。
+- **CMSIS-DAP 探针可能可用。** CMSIS-DAP 是 HID/WinUSB 类设备，部分探针在 ARM64 上无需厂商驱动即可枚举。本文未验证，但可以两行命令自测：attach 后 `wsl -e bash -c "lsusb | grep -i cmsis"`，再 `pip install pyocd && pyocd list` —— 能看到探针就说明断点调试有戏。
 - **模拟运行更慢。** 编译会比原生 x86 稍慢一些。
 - **本文不授予任何 Keil/ARM/ST 授权。** 请勿再分发厂商安装包或器件包，给出官方链接即可。
 

@@ -1,8 +1,12 @@
 # Keil MDK on Windows on ARM (ARM64)
 
-**Using Keil MDK to build *and flash* STM32 firmware from a Windows-on-ARM laptop — and why the vendor drivers will never install.**
+**Using Keil MDK to build *and flash* STM32 firmware from a Windows-on-ARM laptop — and why the vendor drivers still will not install (as of 2026-11).**
 
 [中文说明](README.zh-CN.md)
+
+> **Last verified:** 2026-11-13 · Windows 11 (ARM64, 8 cores) · Keil MDK 5.24 (Lite) ·
+> WSL kernel 6.18.58.1-microsoft-standard-WSL2 · usbipd-win 5.3.0.
+> Version numbers in this document are what it was tested with; check upstream for newer builds.
 
 ---
 
@@ -14,7 +18,7 @@
 | Edit / compile / link / produce `.hex` | ✅ | whole toolchain is user-mode |
 | Flash via ST-Link / ULINK / J-Link | ❌ | needs a **kernel-mode** driver |
 | Flash via on-board USB-serial (CH340/CP210x) | ❌ | same reason |
-| Flash via STM32 built-in USB DFU | ❌ | still needs a kernel-mode WinUSB/ST DFU driver |
+| Flash via STM32 built-in USB DFU | ❌ | needs a signed INF binding the device to inbox WinUSB (workable, but more effort than usbipd) |
 | **Flash via WSL2 + usbipd** | ✅ | driver lives in the **Linux** kernel |
 
 The workaround: keep Keil doing what it can (compile), and move the device I/O into WSL2 through USB/IP. The Linux kernel is a native ARM64 build and already ships the serial drivers — Windows never needs to load one.
@@ -32,7 +36,7 @@ On a Windows-on-ARM machine (Snapdragon / Microsoft SQ series), Keil MDK install
 
 This is not a Keil bug, and it is not fixable by reinstalling drivers "as administrator".
 
-## 2. Why it can never work: user-mode vs kernel-mode
+## 2. Why it does not work today: user-mode vs kernel-mode
 
 Windows on ARM does **not** emulate x86 at the hardware level. It emulates it in **user mode**:
 
@@ -43,7 +47,7 @@ Both work by translating *user-mode* code pages and thunking Win32/NT calls. The
 
 Every debugging probe and USB-serial adapter ships a **kernel-mode** `.sys`. Those binaries are x86 or x64. Windows will not load them on ARM64 — and there is nothing to emulate them with.
 
-The same applies to `WinUSB`-based tools: even a "driverless" solution still needs the device to be **bound** to a driver, and building that binding requires an INF whose `.sys` matches the native architecture.
+The same nuance applies to `WinUSB`-based tools: `winusb.sys` is inbox and *does* exist for ARM64, so this is not an architecture problem - the hurdle is that the device must be **bound** to it with an INF you have to sign yourself.
 
 ### 2.1 Verify it yourself
 
@@ -101,7 +105,7 @@ The DFU driver pack commonly recommended for web-based STM32 flashing tools ship
 | Install the x86/x64 driver anyway | ❌ Windows refuses; kernel architecture must match |
 | x86 VM (VirtualBox / VMware) | ❌ no x86 guest support on ARM64 hosts |
 | QEMU full-system x86 | ⚠️ boots, but USB passthrough is impractical |
-| WebUSB DFU flasher in Chrome/Edge | ⚠️ works **only if** the DFU device is already bound to WinUSB — which needs the missing driver |
+| WebUSB DFU flasher in Chrome/Edge | ⚠️ possible in principle: `winusb.sys` is inbox and exists for ARM64, but the device must first be bound to it with a **self-signed INF** (or test mode). More work than the usbipd route, and untested here |
 | ST-Link / ULINK / J-Link | ❌ vendor tools are not supported on ARM laptops |
 | **WSL2 + usbipd-win** | ✅ recommended |
 
@@ -233,8 +237,8 @@ Plug the target in, then **from an elevated PowerShell**:
 
 ```powershell
 usbipd list
-# BUSID  VID:PID    DEVICE
-# 2-1    1a86:7523  USB-SERIAL CH340 (COM-less on ARM64)   Not shared
+# BUSID  VID:PID    DEVICE                      STATE      <- illustrative; real output differs
+# 2-1    1a86:7523  USB-SERIAL CH340            Not shared
 
 usbipd bind   --busid 2-1
 usbipd attach --wsl --busid 2-1
@@ -376,7 +380,7 @@ For a 512 KB part this must become `STM32F4xx_512` / `-FL080000` / `IROM(0x08000
 
 ### 7.4 USB-C: an A-to-C cable that charges but does nothing
 
-An A-to-C cable presents a **5.1 kΩ pull-down (Rd) on CC** in its C plug. A USB-C host port enables VBUS only after sensing that resistor.
+An **A-to-C** cable is passive: its C plug has no e-marker, only a **56 kΩ pull-up (Rp) to VBUS** that tells a C-port *device* a source is present. The 5.1 kΩ **pull-down (Rd)** lives in the *device*, and it is what a C-port *host* senses before enabling VBUS.
 
 A power bank's **USB-A** port always outputs 5 V and never looks at CC. So:
 
@@ -447,11 +451,11 @@ dmesg | tail -3
 Two traps here:
 
 - `wsl -d <distro> -e modprobe ch341` fails with `execvpe(modprobe) failed` because `-e` does not use a login shell and `/sbin` is not on the PATH. Run it through a shell: `wsl -d <distro> -e bash -c "modprobe ch341"`.
-- After a kernel bump, `/lib/modules` may contain both the old and the new tree. `modprobe` picks the one matching `uname -r`; if that directory is missing entirely, re-run the environment installer.
+- After a kernel bump, `/lib/modules` may contain both the old and the new tree; `modprobe` picks the one matching `uname -r`. If that directory is missing entirely, the module tree - not any installer - is what is gone: check `ls /lib/modules/$(uname -r)`, then reinstall/upgrade WSL itself (`wsl --update`) or reinstall the matching modules.
 
 ## 8. Validation status
 
-Everything below was confirmed on real hardware.
+Everything below was confirmed on real hardware. Vendor support moves: re-check §2.1 (PE machine type) before assuming a driver is still missing.
 
 | Step | Status |
 |---|---|
@@ -487,7 +491,7 @@ Build in Keil, flash from WSL, read the console from WSL. No vendor driver was e
 ## 9. Scope and limitations
 
 - **No in-circuit debugging.** Breakpoints/watchpoints require a probe driver; neither ST-Link nor ULINK works here. Debug with serial output.
-- **A CMSIS-DAP probe may work.** CMSIS-DAP is HID/WinUSB-class; some probes enumerate on ARM64 without a vendor driver. Untested here, but it is the most promising route to real breakpoints.
+- **A CMSIS-DAP probe may work.** CMSIS-DAP is HID/WinUSB-class; some probes enumerate on ARM64 without a vendor driver. Untested here, but it is the most promising route to real breakpoints. Quick check: attach it, then `wsl -e bash -c "lsusb | grep -i cmsis"` and `pip install pyocd && pyocd list` - if the probe shows up, breakpoint debugging is on the table.
 - **Emulation is slower.** Expect compiles a little slower than on native x86.
 - **This document does not grant any Keil/ARM/ST license.** Do not redistribute vendor installers or device packs; link to the official pages instead.
 
