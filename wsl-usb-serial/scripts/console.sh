@@ -1,9 +1,18 @@
 #!/bin/bash
-# 打开开发板的串口终端（picocom + XMODEM 发送能力）
+# 打开开发板的串口终端（picocom），支持 XMODEM 发送/接收
 # 由 serial-console.ps1 调用，也可以直接在 WSL 里跑： bash console.sh [串口]
 
 BAUD="${BAUD:-115200}"
 TTY="${1:-$(ls /dev/ttyUSB* /dev/ttyACM* 2>/dev/null | head -n 1)}"
+
+missing=""
+command -v picocom >/dev/null 2>&1 || missing="$missing picocom"
+command -v sx      >/dev/null 2>&1 || missing="$missing lrzsz(sx/rx)"
+if [ -n "$missing" ]; then
+    echo "[!] 缺少工具：$missing"
+    echo "    先装： sudo apt-get install -y picocom lrzsz"
+    exit 2
+fi
 
 if [ -z "$TTY" ]; then
     echo "[!] 没有找到串口设备（/dev/ttyUSB* 或 /dev/ttyACM*）"

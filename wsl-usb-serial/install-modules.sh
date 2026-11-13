@@ -1,5 +1,5 @@
 #!/bin/bash
-# 换完内核之后，在 WSL 里执行：把配套的模块装进 /lib/modules 并刷新依赖
+# 换完内核之后，把配套的模块装进 /lib/modules 并刷新依赖
 #
 #   bash install-modules.sh
 #
@@ -25,7 +25,7 @@ echo "== 刷新模块依赖 =="
 depmod -a "$KVER"
 
 echo "== 检查关键模块 =="
-for m in vhci_hcd usbip_core ch341 ppdev pl2303; do
+for m in vhci_hcd usbip_core usbserial ch341 pl2303; do
     if modprobe "$m" 2>/dev/null; then
         echo "  $m ✓"
     else

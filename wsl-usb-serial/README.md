@@ -12,10 +12,21 @@ $ modprobe pl2303
 modprobe: FATAL: Module pl2303 not found in directory /lib/modules/6.18.58.1-microsoft-standard-WSL2
 ```
 
+## Build dependencies first
+
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential git flex bison bc libssl-dev \
+                        libelf-dev libncurses-dev dwarves cpio rsync kmod
+```
+
+A minimal rootfs (ubuntu-base) ships none of these. The source tree is ~2 GB and the
+build needs 15-20 GB of free disk.
+
 ## Three steps
 
 ```bash
-bash build-kernel.sh            # ~50 min: build a kernel with PL2303 + the full module set
+bash build-kernel.sh            # ~51 min on 8 cores: kernel + all 4356 modules
 ```
 
 ```powershell
@@ -49,7 +60,7 @@ Remove the `kernel=` line from `%USERPROFILE%\.wslconfig`, then `wsl --shutdown`
 
 ## Measured
 
-Windows 11 ARM64, 8 cores: `make -j8 Image modules` took **51 min 21 s**, 4356 modules.
+Windows 11 ARM64, 8 cores: `make -j8 Image modules` took **51 min 21 s**, 4356 modules (~45-60 min range).
 After switching, `vhci_hcd` loads and `/dev/ttyUSB0` appears.
 
 ## License

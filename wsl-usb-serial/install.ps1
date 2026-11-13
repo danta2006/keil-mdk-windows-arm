@@ -1,38 +1,45 @@
-﻿<#
+<#
     install.ps1 — 把编译好的 WSL 内核装到 Windows 侧，并让 WSL 用它
-
-    做三件事：
-      1. 从 WSL 里把 Image 复制到一个纯英文路径（默认 C:\Users\<你>\wsl-kernel\）
-      2. 备份 %USERPROFILE%\.wslconfig
-      3. 在 [wsl2] 段里写入 kernel= 指向这个 Image
 
     用法：
         powershell -ExecutionPolicy Bypass -File install.ps1
+        powershell -ExecutionPolicy Bypass -File install.ps1 -ImagePath D:\wsl\Image
         powershell -ExecutionPolicy Bypass -File install.ps1 -NoWrite   # 只看会改成什么
+
+    -ImagePath 不给时，会依次找：
+        \\wsl.localhost\<发行版>\root\wsl-kernel-out\Image
+        \\wsl.localhost\<发行版>\root\wsl-kernel-out\bzImage
+        \\wsl.localhost\<发行版>\home\<用户>\wsl-kernel-out\Image
 #>
 param(
-    [string]$Distro   = "Ubuntu2204",
-    [string]$Dest     = "$env:USERPROFILE\wsl-kernel",
+    [string]$Distro = "Ubuntu2204",
+    [string]$Dest   = "$env:USERPROFILE\wsl-kernel",
+    [string]$ImagePath = "",
     [switch]$NoWrite
 )
 
-$ErrorActionPreference = "Stop"
 $cfgPath = Join-Path $env:USERPROFILE ".wslconfig"
 
 function Say($m) { Write-Host "[*] $m" -ForegroundColor Cyan }
 function Ok($m)  { Write-Host "[+] $m" -ForegroundColor Green }
-function Bad($m) { Write-Host "[!] $m" -ForegroundColor Red }
+function Bad($m) { Write-Host "[!] $m" -ForegroundColor Red; exit 1 }
 
-# ---------------------------------------------------------------- 1. 取 Image
-$srcCandidates = @(
-    "\\wsl.localhost\$Distro\root\wsl-kernel-out\Image",
-    "\\wsl.localhost\$Distro\root\wsl-kernel-out\bzImage"
-)
-$src = $srcCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+# ---------------------------------------------------------------- 1. 找镜像
+$cands = @()
+if ($ImagePath) { $cands += $ImagePath }
+$cands += "\\wsl.localhost\$Distro\root\wsl-kernel-out\Image"
+$cands += "\\wsl.localhost\$Distro\root\wsl-kernel-out\bzImage"
+$homeRoot = "\\wsl.localhost\$Distro\home"
+if (Test-Path $homeRoot) {
+    Get-ChildItem $homeRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+        $cands += (Join-Path $_.FullName "wsl-kernel-out\Image")
+        $cands += (Join-Path $_.FullName "wsl-kernel-out\bzImage")
+    }
+}
+
+$src = $cands | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
 if (-not $src) {
-    Bad "WSL 里没找到编译产物（/root/wsl-kernel-out/Image）"
-    Write-Host "    先在 WSL 里跑： bash build-kernel.sh" -ForegroundColor Yellow
-    exit 1
+    Bad "没找到编译产物。先在 WSL 里跑 build-kernel.sh，或用 -ImagePath 指定镜像路径。"
 }
 
 New-Item -ItemType Directory -Force -Path $Dest | Out-Null
@@ -61,7 +68,6 @@ $out    = New-Object System.Collections.Generic.List[string]
 foreach ($line in $lines) {
     $t = $line.Trim()
     if ($t -match '^\[(.+)\]$') {
-        if ($done -and $inWsl2) { }          # 后面还有别的段，不再管
         $inWsl2 = ($Matches[1].Trim().ToLower() -eq 'wsl2')
         $out.Add($line)
         if ($inWsl2 -and -not $done) {
@@ -85,13 +91,15 @@ $out | ForEach-Object { Write-Host ("    " + $_) }
 if ($NoWrite) {
     Write-Host ""
     Ok "（-NoWrite 模式，没有真正写入）"
-    exit 0
 }
 
 [System.IO.File]::WriteAllLines($cfgPath, $out, (New-Object System.Text.UTF8Encoding($false)))
 Ok ("已写入 " + $cfgPath)
 
 Write-Host ""
-Ok "下一步：在 PowerShell 里执行  wsl --shutdown ，然后重新打开 WSL"
-Write-Host "    进去后跑  bash verify.sh  应该看到 CONFIG_USB_SERIAL_PL2303=y" -ForegroundColor Gray
-Write-Host "    想还原：删掉 .wslconfig 里 kernel= 那一行，再 wsl --shutdown" -ForegroundColor Gray
+Ok "下一步："
+Write-Host "    1) wsl --shutdown"
+Write-Host "    2) 重新进 WSL，跑  bash install-modules.sh     <-- 别漏，否则 usbipd 会挂"
+Write-Host "    3) bash verify.sh"
+Write-Host "    回滚：删掉 .wslconfig 里 kernel= 那一行，再 wsl --shutdown" -ForegroundColor Gray
+exit 0

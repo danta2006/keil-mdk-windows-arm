@@ -12,6 +12,18 @@ ARCH="$(uname -m)"
 SRC="${SRC:-$HOME/wsl-kernel}"
 OUT="${OUT:-$HOME/wsl-kernel-out}"
 
+# 依赖预检：ubuntu-base 这类精简 rootfs 里没有编译工具
+missing=""
+for c in gcc make git bc flex bison; do
+    command -v "$c" >/dev/null 2>&1 || missing="$missing $c"
+done
+if [ -n "$missing" ]; then
+    echo "缺少编译依赖:$missing"
+    echo "  sudo apt-get update && sudo apt-get install -y \\"
+    echo "      build-essential git flex bison bc libssl-dev libelf-dev \\"
+    echo "      libncurses-dev dwarves cpio rsync kmod"
+    exit 1
+fi
 echo "=================================================="
 echo " 当前 WSL 内核 : $KVER"
 echo " 对应源码 tag  : $TAG"
@@ -51,7 +63,7 @@ echo "      CONFIG_USB_SERIAL_PL2303=m  ✓"
 echo "      版本号： $(make kernelrelease 2>/dev/null | tail -n 1)"
 
 # ---------------------------------------------------------------- 编译
-echo "[3/5] 编译内核镜像 + 全部模块（最慢，约 40 分钟）"
+echo "[3/5] 编译内核镜像 + 全部模块（8 核约 51 分钟，需要 15-20 GB 空闲磁盘）"
 time make -j"$(nproc)" Image modules
 
 # ---------------------------------------------------------------- 导出

@@ -1,14 +1,22 @@
 #!/bin/bash
 # 内核编译进度条（每秒刷新，Ctrl+C 退出）
 #   LOG       编译日志路径
-#   TOTAL_MIN 预计总时长（分钟），用于估算百分比
+#   TOTAL_MIN 预计总时长（分钟，8 核实测 ~51 分钟），只用于估算百分比
 LOG="${LOG:-/tmp/kbuild5.log}"
 TOTAL_MIN="${TOTAL_MIN:-55}"
 
-if [ ! -f /tmp/kbuild_start ]; then
-    stat -c %W "$LOG" 2>/dev/null > /tmp/kbuild_start || date +%s > /tmp/kbuild_start
+# %W（创建时间）在部分文件系统上返回 0，回退到当前时间
+START=0
+if [ -f /tmp/kbuild_start ]; then
+    START=$(cat /tmp/kbuild_start 2>/dev/null || echo 0)
 fi
-START=$(cat /tmp/kbuild_start 2>/dev/null || date +%s)
+if [ "${START:-0}" -eq 0 ] 2>/dev/null; then
+    START=$(stat -c %W "$LOG" 2>/dev/null || echo 0)
+fi
+if [ "${START:-0}" -eq 0 ] 2>/dev/null; then
+    START=$(date +%s)
+fi
+echo "$START" > /tmp/kbuild_start 2>/dev/null || true
 
 draw_bar() {
     local pct=$1 width=38 filled=$(( $1 * 38 / 100 )) i
@@ -27,8 +35,11 @@ while true; do
     mins=$(( elapsed / 60 ))
     secs=$(( elapsed % 60 ))
 
-    cc_all=$(grep -c '^  CC' "$LOG" 2>/dev/null || echo 0)
-    cc_m=$(grep -c 'CC \[M\]' "$LOG" 2>/dev/null || echo 0)
+    # grep -c 在没有匹配时返回 1，但仍输出 "0"；不能再 `|| echo 0`，否则会输出两行
+    cc_all=$(grep -c '^  CC' "$LOG" 2>/dev/null || true)
+    cc_m=$(grep -c 'CC \[M\]' "$LOG" 2>/dev/null || true)
+    cc_all=${cc_all:-0}
+    cc_m=${cc_m:-0}
 
     if grep -q 'Building modules, stage 2' "$LOG"; then
         pct=99; phase="收尾：生成模块"

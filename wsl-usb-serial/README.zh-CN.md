@@ -11,10 +11,20 @@ $ modprobe pl2303
 modprobe: FATAL: Module pl2303 not found in directory /lib/modules/6.18.58.1-microsoft-standard-WSL2
 ```
 
+## 先装编译依赖
+
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential git flex bison bc libssl-dev \
+                        libelf-dev libncurses-dev dwarves cpio rsync kmod
+```
+
+精简 rootfs（ubuntu-base）里没有这些。另外：源码约 2 GB，编译需要 15–20 GB 空闲磁盘。
+
 ## 三条命令
 
 ```bash
-bash build-kernel.sh            # 约 50 分钟：编一个只多 PL2303 的内核 + 全套模块
+bash build-kernel.sh            # 8 核约 51 分钟：内核 + 全部 4356 个模块
 ```
 
 ```powershell
