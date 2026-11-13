@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Prepare a WSL2 environment able to program STM32 targets on Windows on ARM (ARM64).
 
@@ -7,13 +7,14 @@
     raw.githubusercontent.com), fixes the apt sources for ARM64, installs the flashing
     tools, and verifies that the WSL kernel provides ch341 and vhci-hcd.
 
-    Safe to re-run: if the distribution already exists it is left untouched.
+    Safe to re-run: an existing distribution is not re-imported, but **apt sources
+    are rewritten and packages are installed again** unless you pass -SkipApt.
 
 .PARAMETER DistroName
     Name of the WSL distribution to create. Default: Ubuntu2204
 
 .PARAMETER InstallDir
-    Where the WSL VHDX is stored. Default: C:\WSL\Ubuntu2204
+    Where the WSL VHDX is stored. Default: C:\WSL\<DistroName>
 
 .PARAMETER RootfsUrl
     URL of an ubuntu-base ARM64 tarball.
@@ -22,26 +23,50 @@
     apt mirror for ubuntu-ports. Must use http:// on a bare rootfs,
     because ca-certificates is not installed yet.
 
+.PARAMETER Codename
+    Ubuntu codename (jammy / noble / ...). If omitted it is derived from
+    -RootfsUrl, so a 24.04 rootfs never ends up with jammy apt sources.
+
+.PARAMETER SkipApt
+    Do not touch /etc/apt/sources.list and do not install packages.
+
 .EXAMPLE
     .\Install-WslStm32Env.ps1
 
 .EXAMPLE
-    .\Install-WslStm32Env.ps1 -DistroName Ubuntu2404 `
+    .\Install-WslStm32Env.ps1 -DistroName Ubuntu2404 -InstallDir C:\WSL\Ubuntu2404 `
         -RootfsUrl "https://mirrors.tuna.tsinghua.edu.cn/ubuntu-cdimage/ubuntu-base/releases/noble/release/ubuntu-base-24.04.3-base-arm64.tar.gz"
 #>
 [CmdletBinding()]
 param(
     [string]$DistroName = "Ubuntu2204",
-    [string]$InstallDir = "C:\WSL\Ubuntu2204",
+    [string]$InstallDir = "",
     [string]$RootfsUrl  = "https://mirrors.tuna.tsinghua.edu.cn/ubuntu-cdimage/ubuntu-base/releases/jammy/release/ubuntu-base-22.04.5-base-arm64.tar.gz",
     [string]$MirrorBase = "http://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports",
-    [string]$Codename   = "jammy"
+    [string]$Codename   = "",
+    [switch]$SkipApt
 )
 
 $ErrorActionPreference = "Continue"
 function Say($m) { Write-Host "[*] $m" -ForegroundColor Cyan }
 function Ok($m)  { Write-Host "[+] $m" -ForegroundColor Green }
 function Bad($m) { Write-Host "[!] $m" -ForegroundColor Red }
+
+# ---------------------------------------------------------------- defaults
+if (-not $InstallDir) { $InstallDir = Join-Path "C:\WSL" $DistroName }
+
+# Derive the codename from the rootfs URL unless the caller pinned it; otherwise a
+# noble rootfs silently gets jammy apt sources and apt fails on every package.
+if (-not $Codename) {
+    foreach ($c in @("noble", "jammy", "focal", "oracular", "plucky")) {
+        if ($RootfsUrl -match "/$c/") { $Codename = $c; break }
+    }
+}
+if (-not $Codename) {
+    Bad "Cannot tell the Ubuntu codename from -RootfsUrl. Pass -Codename explicitly."
+    exit 1
+}
+Say "Distro=$DistroName  Codename=$Codename  Dir=$InstallDir"
 
 # ---------------------------------------------------------------- architecture
 # NOTE: $env:PROCESSOR_ARCHITECTURE reports the *process* architecture. Under an
@@ -52,7 +77,7 @@ try { $sysType = (Get-CimInstance Win32_ComputerSystem).SystemType } catch { }
 Say "Host: $sysType   (PROCESSOR_IDENTIFIER=$env:PROCESSOR_IDENTIFIER)"
 if ($sysType -notlike "*ARM64*" -and $env:PROCESSOR_IDENTIFIER -notmatch "ARM") {
     Bad "This script targets Windows on ARM. On x86/x64 you do not need it - install the vendor driver instead."
-    return
+    exit 1
 }
 
 # ---------------------------------------------------------------- virtualization
@@ -66,7 +91,7 @@ foreach ($svc in @("vmcompute", "hns")) {
 Say "Checking WSL"
 if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
     Bad "wsl.exe not found. Enable 'Virtual Machine Platform' and install the WSL app first."
-    return
+    exit 1
 }
 $wslVer = ((& wsl --version 2>$null) | Out-String) -replace "`0", ""
 if ($wslVer -match "([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)") { Ok "WSL $($Matches[1])" } else { Ok "WSL present" }
@@ -93,7 +118,7 @@ else {
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
     Say "Importing into $InstallDir"
     & wsl --import $DistroName $InstallDir $tar --version 2
-    if ($LASTEXITCODE -ne 0) { Bad "Import failed (exit $LASTEXITCODE)"; return }
+    if ($LASTEXITCODE -ne 0) { Bad "Import failed (exit $LASTEXITCODE)"; exit 1 }
     Ok "Imported"
 }
 
@@ -102,6 +127,9 @@ Say "Bringing the distribution up (first start can take ~20 s)"
 & wsl -d $DistroName -e bash -c "echo ready" | Out-Null
 
 # ---------------------------------------------------------------- apt sources
+if ($SkipApt) {
+    Say "-SkipApt: leaving /etc/apt/sources.list and the package set untouched"
+} else {
 Say "Configuring apt sources (must be http:// until ca-certificates is installed)"
 $sources = @(
     "deb $MirrorBase/ $Codename main restricted universe multiverse"
@@ -120,9 +148,14 @@ Ok "sources.list written"
 
 # ---------------------------------------------------------------- packages
 Say "Installing tools (this takes a few minutes)"
-& wsl -d $DistroName -e bash -c "export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq ca-certificates stm32flash dfu-util picocom usbutils kmod 2>&1 | tail -5"
-if ($LASTEXITCODE -ne 0) { Bad "Package installation failed"; return }
+# lrzsz 提供 sx/rx（XMODEM）；build-* 是重编 WSL 内核要用的
+$pkgs = "ca-certificates stm32flash dfu-util picocom lrzsz usbutils kmod " +
+        "build-essential git flex bison bc libssl-dev libelf-dev libncurses-dev dwarves cpio rsync"
+& wsl -d $DistroName -e bash -c "export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq $pkgs 2>&1 | tail -5"
+if ($LASTEXITCODE -ne 0) { Bad "Package installation failed"; exit 1 }
 Ok "Tools installed"
+}
+
 
 # ---------------------------------------------------------------- kernel modules
 Say "Verifying USB serial / USB-IP support in the WSL kernel"

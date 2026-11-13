@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Open a serial monitor on a USB-serial adapter forwarded into WSL.
 
@@ -46,7 +46,7 @@ if (-not $Port) {
     if ($ports.Count -eq 0) {
         Bad "No serial device found in WSL."
         Write-Host "    Did you run Attach-UsbDevice.ps1 after plugging the board in?" -ForegroundColor Yellow
-        return
+        exit 1
     }
     if ($ports.Count -eq 1) {
         $Port = $ports[0]

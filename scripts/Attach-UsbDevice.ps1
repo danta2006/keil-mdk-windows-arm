@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Bind a USB device and attach it to a WSL2 distribution (requires Administrator).
 
@@ -39,15 +39,15 @@ $usbipd = "C:\Program Files\usbipd-win\usbipd.exe"
 if (-not (Test-Path $usbipd)) { $usbipd = (Get-Command usbipd.exe -ErrorAction SilentlyContinue).Source }
 if (-not $usbipd) {
     Bad "usbipd not found. Install the ARM64 build from https://github.com/dorssel/usbipd-win/releases"
-    return
+    exit 1
 }
 
 Say "Devices:"
 & $usbipd list
-if ($List) { return }
+if ($List) { exit 0 }
 
 if (-not $BusId) { $BusId = (Read-Host "Enter BUSID to attach (e.g. 2-1)").Trim() }
-if (-not $BusId) { Bad "No BUSID given"; return }
+if (-not $BusId) { Bad "No BUSID given"; exit 1 }
 
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -59,17 +59,17 @@ if ($isAdmin) {
 } else {
     Bad "bind needs Administrator. Re-run this script from an elevated prompt."
     Write-Host "    usbipd bind --busid $BusId" -ForegroundColor Yellow
-    return
+    exit 1
 }
 
 Say "Waking distribution '$DistroName'"
 & wsl -d $DistroName -e bash -c "echo ok" | Out-Null
 
 Say "attach $BusId -> $DistroName"
-& $usbipd attach --wsl --busid $BusId
+& $usbipd attach --wsl --busid $BusId --auto-attach
 if ($LASTEXITCODE -ne 0) {
     Bad "attach failed. Is the distribution running?  wsl -d $DistroName -e true"
-    return
+    exit 1
 }
 Ok "Attached"
 
@@ -80,3 +80,4 @@ Say "What WSL sees:"
 Write-Host ""
 Write-Host "    NOTE: attach does not survive unplugging or a VM restart. Re-run this script."
 Write-Host ""
+exit 0

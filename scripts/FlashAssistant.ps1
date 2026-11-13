@@ -107,6 +107,11 @@ function Run-Cmd {
     $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
     try { $p = [System.Diagnostics.Process]::Start($psi) } catch { return @{ Code = -1; Out = $_.Exception.Message } }
 
+    # Start draining both pipes before waiting: reading them only after the child
+    # exits deadlocks as soon as it fills the 4 KB pipe buffer (Keil logs do).
+    $soTask = $p.StandardOutput.ReadToEndAsync()
+    $seTask = $p.StandardError.ReadToEndAsync()
+
     $sw = [Diagnostics.Stopwatch]::StartNew()
     while (-not $p.HasExited) {
         if ($OnTick) { & $OnTick } elseif ($null -ne $script:app) { [System.Windows.Forms.Application]::DoEvents() }
@@ -114,8 +119,9 @@ function Run-Cmd {
         if ($TimeoutSec -gt 0 -and $sw.Elapsed.TotalSeconds -gt $TimeoutSec) { try { $p.Kill() } catch {}; break }
     }
     $o = ""; $e = ""
-    try { $o = $p.StandardOutput.ReadToEnd() } catch {}
-    try { $e = $p.StandardError.ReadToEnd() } catch {}
+    try { [void]$p.WaitForExit(5000) } catch {}
+    try { $o = $soTask.Result } catch {}
+    try { $e = $seTask.Result } catch {}
     $code = -1
     try { $code = $p.ExitCode } catch {}
     return @{ Code = $code; Out = ($o + $e) }
@@ -127,16 +133,42 @@ function Wsl-Cmd([string]$Command) {
 }
 
 function Get-UsbInfo {
-    if (-not (Test-Path $USBD)) { return [pscustomobject]@{ Found = $false; State = "usbipd not installed"; BusId = "" } }
+    # Only USB-serial style adapters count. Matching "the first device in the list"
+    # picks up the camera / touchpad / Bluetooth radio on many laptops - those have
+    # lower BUSIDs and appear first - and then bind the wrong device into WSL.
+    if (-not (Test-Path $USBD)) { return [pscustomobject]@{ Found = $false; State = "usbipd not installed"; BusId = ""; Id = ""; Candidates = @() } }
     $r = Run-Cmd $USBD @("list") 30
+    $cands = @()
     foreach ($line in ([string]$r.Out -split "`r?`n")) {
-        if ($line -match '^\s*(\d+-\d+)\s+([0-9a-fA-F]{4}:[0-9a-fA-F]{4})\s+(.+?)\s*$') {
-            $state = "Unknown"
-            if ($line -match '(Not shared|Shared|Attached)') { $state = $Matches[1] }
-            return [pscustomobject]@{ Found = $true; State = $state; BusId = $Matches[1]; Id = $Matches[2] }
+        if ($line -notmatch '^\s*(\d+-\d+)\s+([0-9a-fA-F]{4}):([0-9a-fA-F]{4})\s+(.+?)\s*$') { continue }
+        $busid = $Matches[1]
+        $vid   = $Matches[2].ToLower()
+        $pidn  = $Matches[3].ToLower()
+        $desc  = $Matches[4].Trim()
+        $state = "Unknown"
+        if ($desc -match '(Not shared|Shared|Attached)') { $state = $Matches[1] }
+        if ($vid -notin @('1a86','10c4','0403','067b') -and
+            $desc -notmatch 'CH34|Serial|UART|CP210|FT232|PL230') { continue }
+        $cands += [pscustomobject]@{
+            BusId = $busid
+            Id    = "$vid`:$pidn"
+            Desc  = ($desc -replace '\s*(Not shared|Shared|Attached)\s*$', '').Trim()
+            State = $state
         }
     }
-    return [pscustomobject]@{ Found = $false; State = "no USB serial device"; BusId = ""; Id = "" }
+    $script:UsbCandidates = $cands
+    if ($cands.Count -eq 0) {
+        return [pscustomobject]@{ Found = $false; State = "no USB serial device"; BusId = ""; Id = ""; Candidates = @() }
+    }
+    $pick = $cands[0]
+    if ($cands.Count -gt 1) {
+        # Prefer the adapter used last time instead of silently taking the first one.
+        $saved = ""
+        if ($null -ne $script:settings) { $saved = [string]$script:settings.LastBusId }
+        $hit = $cands | Where-Object { $_.BusId -eq $saved } | Select-Object -First 1
+        if ($hit) { $pick = $hit }
+    }
+    return [pscustomobject]@{ Found = $true; State = $pick.State; BusId = $pick.BusId; Id = $pick.Id; Candidates = $cands }
 }
 
 function Ensure-Tty([int]$Retries = 1) {
@@ -160,14 +192,32 @@ if ($AttachOnly) {
     if (-not $BusId) {
         $info = Get-UsbInfo
         if (-not $info.Found) { Say "No USB serial device found." Red; exit 1 }
-        $BusId = $info.BusId
+        if ($info.Candidates.Count -gt 1) {
+            $saved = ""
+            if ($null -ne $script:settings) { $saved = [string]$script:settings.LastBusId }
+            $hit = $null
+            if ($saved) { $hit = $info.Candidates | Where-Object { $_.BusId -eq $saved } | Select-Object -First 1 }
+            if ($hit) {
+                Say ("Several candidates; using the last one used: {0}  {1}" -f $hit.BusId, $hit.Desc) Yellow
+                $BusId = $hit.BusId
+            } else {
+                Say "Several USB-serial devices found - pass -BusId explicitly:" Red
+                $info.Candidates | ForEach-Object { Say ("  {0}  {1}  {2}  [{3}]" -f $_.BusId, $_.Id, $_.Desc, $_.State) }
+                exit 1
+            }
+        } else {
+            $BusId = $info.BusId
+        }
     }
     Say "BUSID: $BusId"
     Run-Cmd $USBD @("bind", "--busid", $BusId) 30 | Out-Null
     Run-Cmd "wsl.exe" @("-d", $DistroName, "-e", "bash", "-c", "echo ok") 30 | Out-Null
     $r = Run-Cmd $USBD @("attach", "--wsl", "--busid", $BusId, "--auto-attach") 40
     Say ([string]$r.Out)
-    if ($r.Code -eq 0) { Say "Attached." Green } else { Say "attach failed (exit $($r.Code))" Red }
+    if ($r.Code -eq 0) {
+        Say "Attached." Green
+        if ($null -ne $script:settings) { $script:settings.LastBusId = $BusId; Save-Settings $script:settings }
+    } else { Say "attach failed (exit $($r.Code))" Red }
     Start-Sleep -Milliseconds 800
     exit $r.Code
 }
@@ -181,7 +231,6 @@ $script:busy       = $false
 $script:settings   = Load-Settings
 if ($Project) { $script:settings.Project = $Project }
 if ($Hex)     { $script:settings.Hex = $Hex }
-if ($DistroName -ne "Ubuntu2204") { $script:settings.Distro = $DistroName }
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "STM32 Flash Assistant  (Windows on ARM)"
@@ -436,9 +485,11 @@ function Do-Build {
     }
     if ($r.Code -ge 2) { Log "Build failed (exit $($r.Code))" "err"; return $false }
 
-    $objDir = Join-Path (Split-Path $proj -Parent) "..\OBJ"
+    $projDir = Split-Path $proj -Parent
     $cand = @()
-    foreach ($d in @((Join-Path (Split-Path $proj -Parent) "..\OBJ"), (Join-Path (Split-Path $proj -Parent) "OBJ"))) {
+    # Keil writes to OBJ\ by default, but "Objects" is used by some templates.
+    foreach ($d in @((Join-Path $projDir "..\OBJ"), (Join-Path $projDir "OBJ"),
+                     (Join-Path $projDir "..\Objects"), (Join-Path $projDir "Objects"))) {
         if (Test-Path $d) { $cand += (Get-ChildItem $d -Filter *.hex -ErrorAction SilentlyContinue) }
     }
     $hexFound = $cand | Sort-Object LastWriteTime -Descending | Select-Object -First 1
@@ -467,6 +518,11 @@ function Do-Flash {
     $hexFile = $cmbHex.Text.Trim()
     if (-not $hexFile) { Log "Pick a .hex firmware first." "err"; return }
     if (-not (Test-Path $hexFile)) { Log "Firmware not found: $hexFile" "err"; return }
+    if ([System.IO.Path]::GetExtension($hexFile) -ne ".hex") {
+        Log ("stm32flash only accepts Intel HEX; this is " + [System.IO.Path]::GetExtension($hexFile)) "err"
+        Log "  re-export as .hex in Keil (Options for Target -> Output -> Create HEX File)" "warn"
+        return
+    }
     Save-CurrentSettings
 
     $tty = Ensure-Tty 6
@@ -491,9 +547,7 @@ function Do-Flash {
     Log "Flashing $([System.IO.Path]::GetFileName($hexFile)) to $tty ..."
     $r = Run-Cmd "wsl.exe" @("-d", $DistroName, "-e", "stm32flash",
                              "-w", (To-WslPath $hexFile), "-v", "-g", "0x08000000", $tty) 400
-    $last = ""
     foreach ($line in ([string]$r.Out -split "`r?`n")) {
-        if ($line.Trim()) { $last = $line.Trim() }
         if ($line -match "Device ID|Flash\s+:|Wrote|Done|Starting|Failed|Error") { Log ("  " + $line.Trim()) }
     }
     if ($r.Code -eq 0) {
@@ -540,7 +594,7 @@ $btnBrowseProj.Add_Click({
 
 $btnBrowseHex.Add_Click({
     $dlg = New-Object System.Windows.Forms.OpenFileDialog
-    $dlg.Filter = "Firmware (*.hex;*.bin)|*.hex;*.bin|All files (*.*)|*.*"
+    $dlg.Filter = "Firmware (*.hex)|*.hex|All files (*.*)|*.*"
     $dirs = @(Get-OutputDirs)
     if ($dirs.Count -gt 0) { $dlg.InitialDirectory = $dirs[0] }
     elseif ($Hex) { $dlg.InitialDirectory = (Split-Path $Hex -Parent) }
@@ -600,7 +654,11 @@ $btnFlashOnly.Add_Click({
 
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 7000
-$timer.Add_Tick({ if (-not $script:busy) { Update-Status 1 } })
+$timer.Add_Tick({
+    # Only poll while there is something to poll for: this used to spawn a wsl +
+    # modprobe round trip every 7 s even when the device was already attached.
+    if (-not $script:busy -and $lblState.Text -notlike "Device ready*") { Update-Status 1 }
+})
 
 $form.Add_Shown({
     $script:app = $form

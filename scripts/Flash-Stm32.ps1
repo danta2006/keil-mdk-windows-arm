@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Flash an STM32 over USB from WSL (UART bootloader via stm32flash, or DFU via dfu-util).
 
@@ -66,7 +66,7 @@ function To-WslPath([string]$win) {
 # ---------------------------------------------------------------- sanity
 Say "Distribution: $DistroName"
 & wsl -d $DistroName -e bash -c "echo ok" | Out-Null
-if ($LASTEXITCODE -ne 0) { Bad "Cannot start WSL distribution '$DistroName'"; return }
+if ($LASTEXITCODE -ne 0) { Bad "Cannot start WSL distribution '$DistroName'"; exit 1 }
 
 Say "USB devices visible in WSL:"
 $usb = ((& wsl -d $DistroName -e lsusb 2>$null) | Out-String).Trim()
@@ -87,7 +87,7 @@ if ($PSCmdlet.ParameterSetName -eq "Isp") {
             Bad "No /dev/ttyUSB* or /dev/ttyACM* in WSL."
             Write-Host "    - Did you run Attach-UsbDevice.ps1 after plugging the board in?" -ForegroundColor Yellow
             Write-Host "    - Is BOOT0 = 1 and did you press RESET?" -ForegroundColor Yellow
-            return
+            exit 1
         }
         Ok "Using $Port"
     }
@@ -108,7 +108,7 @@ else {
         Bad "No STM32 DFU device in WSL (looked for 0483:df11)."
         Write-Host "    - BOOT0 = 1, then reset, then connect the MCU's own USB port" -ForegroundColor Yellow
         Write-Host "    - Re-run Attach-UsbDevice.ps1 afterwards" -ForegroundColor Yellow
-        return
+        exit 1
     }
     Ok "DFU device present"
 
@@ -133,3 +133,6 @@ if ($code -eq 0) {
     Write-Host "      * Device not attached - re-run Attach-UsbDevice.ps1"
 }
 Write-Host ""
+
+# 把 stm32flash / dfu-util 的退出码透传给调用方（CI、批处理）
+exit $code
