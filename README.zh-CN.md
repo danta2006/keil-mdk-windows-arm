@@ -494,7 +494,7 @@ uptime = 14 s
 CH340 / CP210x / FTDI 插上就能用，**PL2303 不行**：微软的 WSL2 内核没编这个驱动，
 也没法单独补模块，只能重编一次内核。
 
-完整做法和踩坑记录在 **[wsl-usb-serial/](wsl-usb-serial/README.md)**（约 50 分钟，含一键脚本、编译进度条和验证命令）。
+完整做法和踩坑记录在 **[wsl-usb-serial/](wsl-usb-serial/README.zh-CN.md)**（约 50 分钟，含一键脚本、编译进度条和验证命令）。
 
 ## 11. 许可
 
