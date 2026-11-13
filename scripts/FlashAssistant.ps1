@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Graphical front-end for building and flashing STM32 firmware on Windows on ARM.
 

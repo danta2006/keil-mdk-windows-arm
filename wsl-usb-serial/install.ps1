@@ -1,4 +1,4 @@
-<#
+﻿<#
     install.ps1 — 把编译好的 WSL 内核装到 Windows 侧，并让 WSL 用它
 
     用法：
